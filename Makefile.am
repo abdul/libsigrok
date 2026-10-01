@@ -355,6 +355,14 @@ src_libdrivers_la_SOURCES += \
 	src/hardware/dreamsourcelab-dslogic/protocol.c \
 	src/hardware/dreamsourcelab-dslogic/api.c
 endif
+if HW_EYES17
+src_libdrivers_la_SOURCES += \
+	src/hardware/eyes17/protocol.h \
+	src/hardware/eyes17/protocol.c \
+	src/hardware/eyes17/acquisition.c \
+	src/hardware/eyes17/calibration.c \
+	src/hardware/eyes17/api.c
+endif
 if HW_FLUKE_45
 src_libdrivers_la_SOURCES += \
 	src/hardware/fluke-45/protocol.h \

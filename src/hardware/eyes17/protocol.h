@@ -55,10 +55,24 @@ struct eyes17_version {
 	int minor;
 };
 
+/* Config surface and acquisition validation (api.c, Task 6). A1
+ * symmetric input ranges (+/-V), golden eyes.py:select_range:1303, map
+ * 1:1 onto PGA gain indices 0..7; index 8 stays excluded. */
+#define EYES17_NUM_RANGES 8
+#define EYES17_RESOLUTION_10BIT 10
+#define EYES17_RESOLUTION_12BIT 12
+#define EYES17_DEFAULT_SAMPLERATE 100000
+#define EYES17_DEFAULT_LIMIT_SAMPLES 1000
+#define EYES17_ANALOG_DIGITS 3
+
 struct dev_context {
 	struct sr_serial_dev_inst *serial;
 	struct eyes17_version fw;
 	GByteArray *rxbuf;
+	uint64_t samplerate;
+	uint64_t limit_samples;
+	int gain;
+	int resolution;
 };
 
 SR_PRIV void eyes17_put_u16_le(uint8_t *p, uint16_t v);
@@ -88,5 +102,16 @@ SR_PRIV gboolean eyes17_calibration_is_ready(void);
 SR_PRIV gboolean eyes17_calibration_load(const uint8_t *flash, size_t len);
 SR_PRIV int eyes17_capture_one(struct sr_serial_dev_inst *serial,
 		uint16_t tb8, uint16_t count, int gain, float *volts_out);
+
+/* Samplerate ladder, resolution gate, combo validation (Task 6). */
+SR_PRIV const uint64_t *eyes17_samplerate_list(unsigned *n);
+SR_PRIV int eyes17_samplerate_to_tb8(uint64_t rate, uint16_t *tb8_out);
+SR_PRIV int eyes17_check_resolution(int bits);
+SR_PRIV int eyes17_check_acquisition(uint64_t samplerate, uint64_t limit,
+		int gain, int resolution, uint16_t *tb8_out,
+		uint16_t *count_out);
+SR_PRIV const char **eyes17_range_list(unsigned *n);
+SR_PRIV const char *eyes17_range_text(int gain);
+SR_PRIV int eyes17_range_to_gain(const char *s, int *gain_out);
 
 #endif

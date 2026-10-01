@@ -29,14 +29,23 @@ static const uint32_t drvopts[] = {
 	SR_CONF_OSCILLOSCOPE,
 };
 
+static const uint32_t devopts[] = {
+	SR_CONF_SAMPLERATE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_RANGE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_DIGITS | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+};
+
+/* ADC resolution option: 10-bit now, 12-bit arrives with M6. */
+static const char *eyes17_digits[] = { "10", "12" };
+
 /*
- * All of scan/config_set/config_list/dev_open/dev_close/
+ * All of scan/config_get/config_set/config_list/dev_open/dev_close/
  * dev_acquisition_start/dev_acquisition_stop must be non-NULL: this tree's
  * src/backend.c sanity_check_all_drivers() aborts sr_init() for the whole
  * library otherwise. scan probes the given conn for an ExpEYES17 firmware
  * string; dev_open/dev_close are the standard serial helpers.
- * config_get/config_channel_set/config_commit are genuinely optional and
- * stay NULL.
+ * config_channel_set/config_commit are genuinely optional and stay NULL.
  */
 static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 {
@@ -70,6 +79,10 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 	}
 
 	devc = g_malloc0(sizeof(*devc));
+	devc->samplerate = EYES17_DEFAULT_SAMPLERATE;
+	devc->limit_samples = EYES17_DEFAULT_LIMIT_SAMPLES;
+	devc->gain = 0;
+	devc->resolution = EYES17_RESOLUTION_10BIT;
 	if (eyes17_get_version(serial, &devc->fw) != SR_OK) {
 		g_free(devc);
 		serial_close(serial);
@@ -92,29 +105,180 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 	return std_scan_complete(driver, g_slist_append(NULL, sdi));
 }
 
+static int config_get(uint32_t key, GVariant **data,
+	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
+{
+	struct dev_context *devc;
+	const char *text;
+
+	(void)cg;
+
+	if (!sdi || !data)
+		return SR_ERR_ARG;
+	devc = sdi->priv;
+	if (!devc)
+		return SR_ERR_ARG;
+
+	switch (key) {
+	case SR_CONF_SAMPLERATE:
+		*data = g_variant_new_uint64(devc->samplerate);
+		break;
+	case SR_CONF_LIMIT_SAMPLES:
+		*data = g_variant_new_uint64(devc->limit_samples);
+		break;
+	case SR_CONF_RANGE:
+		text = eyes17_range_text(devc->gain);
+		if (!text)
+			return SR_ERR_BUG;
+		*data = g_variant_new_string(text);
+		break;
+	case SR_CONF_DIGITS:
+		if (devc->resolution == EYES17_RESOLUTION_10BIT)
+			text = "10";
+		else if (devc->resolution == EYES17_RESOLUTION_12BIT)
+			text = "12";
+		else
+			return SR_ERR_BUG;
+		*data = g_variant_new_string(text);
+		break;
+	default:
+		return SR_ERR_NA;
+	}
+
+	return SR_OK;
+}
+
 static int config_set(uint32_t key, GVariant *data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
-	(void)key;
-	(void)data;
-	(void)sdi;
-	(void)cg;
-	return SR_ERR_NA;
-}
+	struct dev_context *devc;
+	const uint64_t *rates;
+	const char *s;
+	unsigned n;
+	int gain;
 
-static int dev_acquisition_start(const struct sr_dev_inst *sdi)
-{
-	(void)sdi;
-	return SR_ERR;
+	(void)cg;
+
+	if (!sdi || !data)
+		return SR_ERR_ARG;
+	devc = sdi->priv;
+	if (!devc)
+		return SR_ERR_ARG;
+
+	switch (key) {
+	case SR_CONF_SAMPLERATE:
+		rates = eyes17_samplerate_list(&n);
+		if (std_u64_idx(data, rates, n) < 0)
+			return SR_ERR_ARG;
+		devc->samplerate = g_variant_get_uint64(data);
+		break;
+	case SR_CONF_LIMIT_SAMPLES:
+		/* Clamp per the Task-4 convention; zero fails at start. */
+		devc->limit_samples =
+			eyes17_clamp_count((size_t)g_variant_get_uint64(data));
+		break;
+	case SR_CONF_RANGE:
+		s = g_variant_get_string(data, NULL);
+		if (eyes17_range_to_gain(s, &gain) != SR_OK)
+			return SR_ERR_ARG;
+		devc->gain = gain;
+		break;
+	case SR_CONF_DIGITS:
+		s = g_variant_get_string(data, NULL);
+		if (g_strcmp0(s, "10") == 0) {
+			devc->resolution = EYES17_RESOLUTION_10BIT;
+		} else if (g_strcmp0(s, "12") == 0) {
+			sr_err("12-bit capture not yet supported (M6).");
+			return SR_ERR;
+		} else {
+			return SR_ERR_ARG;
+		}
+		break;
+	default:
+		return SR_ERR_NA;
+	}
+
+	return SR_OK;
 }
 
 static int config_list(uint32_t key, GVariant **data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
-	/* No device options yet (devopts lands with acquisition config in
-	 * later tasks); NULL, 0 keeps this warning-free. */
-	return std_opts_config_list(key, data, sdi, cg,
-		ARRAY_AND_SIZE(scanopts), ARRAY_AND_SIZE(drvopts), NULL, 0);
+	unsigned n;
+
+	switch (key) {
+	case SR_CONF_SCAN_OPTIONS:
+	case SR_CONF_DEVICE_OPTIONS:
+		return std_opts_config_list(key, data, sdi, cg,
+			ARRAY_AND_SIZE(scanopts), ARRAY_AND_SIZE(drvopts),
+			ARRAY_AND_SIZE(devopts));
+	case SR_CONF_SAMPLERATE:
+		*data = std_gvar_samplerates(eyes17_samplerate_list(&n), n);
+		return SR_OK;
+	case SR_CONF_RANGE:
+		*data = std_gvar_array_str(eyes17_range_list(&n), n);
+		return SR_OK;
+	case SR_CONF_DIGITS:
+		*data = std_gvar_array_str(ARRAY_AND_SIZE(eyes17_digits));
+		return SR_OK;
+	default:
+		return SR_ERR_NA;
+	}
+}
+
+/*
+ * Single-shot A1 acquisition: validate the requested combo, run the
+ * Task-4 immediate capture, then emit HEADER, one ANALOG packet
+ * (SR_MQ_VOLTAGE, volts) and END. No trigger or gain-switch command
+ * on this path (M3/M6 own those); gain selects the calibration curve.
+ */
+static int dev_acquisition_start(const struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	struct sr_serial_dev_inst *serial;
+	struct sr_datafeed_packet packet;
+	struct sr_datafeed_analog analog;
+	struct sr_analog_encoding encoding;
+	struct sr_analog_meaning meaning;
+	struct sr_analog_spec spec;
+	uint16_t tb8, count;
+	float *volts;
+	int ret;
+
+	if (!sdi || !sdi->priv || !sdi->conn)
+		return SR_ERR_ARG;
+	devc = sdi->priv;
+	serial = sdi->conn;
+
+	ret = eyes17_check_acquisition(devc->samplerate, devc->limit_samples,
+		devc->gain, devc->resolution, &tb8, &count);
+	if (ret != SR_OK)
+		return ret;
+
+	volts = g_malloc(count * sizeof(*volts));
+	ret = eyes17_capture_one(serial, tb8, count, devc->gain, volts);
+	if (ret != SR_OK) {
+		g_free(volts);
+		return ret;
+	}
+
+	std_session_send_df_header(sdi);
+
+	sr_analog_init(&analog, &encoding, &meaning, &spec,
+		EYES17_ANALOG_DIGITS);
+	analog.meaning->mq = SR_MQ_VOLTAGE;
+	analog.meaning->unit = SR_UNIT_VOLT;
+	analog.meaning->channels = sdi->channels;
+	analog.num_samples = count;
+	analog.data = volts;
+	packet.type = SR_DF_ANALOG;
+	packet.payload = &analog;
+	sr_session_send(sdi, &packet);
+	g_free(volts);
+
+	std_session_send_df_end(sdi);
+
+	return SR_OK;
 }
 
 static struct sr_dev_driver eyes17_driver_info = {
@@ -126,7 +290,7 @@ static struct sr_dev_driver eyes17_driver_info = {
 	.scan = scan,
 	.dev_list = std_dev_list,
 	.dev_clear = std_dev_clear,
-	.config_get = NULL,
+	.config_get = config_get,
 	.config_set = config_set,
 	.config_channel_set = NULL,
 	.config_commit = NULL,

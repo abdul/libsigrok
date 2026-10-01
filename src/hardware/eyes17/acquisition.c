@@ -49,6 +49,85 @@ uint16_t eyes17_clamp_count(size_t count)
 	return (uint16_t)count;
 }
 
+/*
+ * Samplerate ladder (Task 6): every entry is exactly 8e6/tb8 for an
+ * integer tb8 (Task-4 timebase math above), so each advertised rate
+ * is a tested quantizer step -- never an untested rate. tb8 12 is the
+ * 1.5 us floor (EYES17_TB8_MIN); the slowest entry keeps a full
+ * single-shot capture inside the firmware window.
+ */
+static const uint16_t eyes17_ladder_tb8[] = {
+	12, 16, 20, 32, 40, 80, 160, 200, 400, 800, 1600, 8000,
+};
+
+static const uint64_t eyes17_ladder_rates[] = {
+	666666, 500000, 400000, 250000, 200000, 100000,
+	50000, 40000, 20000, 10000, 5000, 1000,
+};
+
+const uint64_t *eyes17_samplerate_list(unsigned *n)
+{
+	if (n)
+		*n = ARRAY_SIZE(eyes17_ladder_rates);
+	return eyes17_ladder_rates;
+}
+
+int eyes17_samplerate_to_tb8(uint64_t rate, uint16_t *tb8_out)
+{
+	unsigned i;
+
+	for (i = 0; i < ARRAY_SIZE(eyes17_ladder_rates); i++) {
+		if (eyes17_ladder_rates[i] == rate) {
+			if (tb8_out)
+				*tb8_out = eyes17_ladder_tb8[i];
+			return SR_OK;
+		}
+	}
+	return SR_ERR_ARG;
+}
+
+/*
+ * 12-bit capture belongs to M6: reject it explicitly, never fall
+ * back to 10-bit silently.
+ */
+int eyes17_check_resolution(int bits)
+{
+	if (bits == EYES17_RESOLUTION_10BIT)
+		return SR_OK;
+	if (bits == EYES17_RESOLUTION_12BIT)
+		return SR_ERR;
+	return SR_ERR_ARG;
+}
+
+/*
+ * Validate a requested acquisition combo before touching hardware.
+ * Oversize sample counts clamp per the Task-4 convention; a zero
+ * count, an off-ladder rate, an invalid gain, or 12-bit mode fail.
+ */
+int eyes17_check_acquisition(uint64_t samplerate, uint64_t limit,
+		int gain, int resolution, uint16_t *tb8_out,
+		uint16_t *count_out)
+{
+	uint16_t tb8, count;
+	int ret;
+
+	ret = eyes17_check_resolution(resolution);
+	if (ret != SR_OK)
+		return ret;
+	if (!eyes17_gain_is_valid(gain))
+		return SR_ERR_ARG;
+	if (eyes17_samplerate_to_tb8(samplerate, &tb8) != SR_OK)
+		return SR_ERR_ARG;
+	if (limit == 0)
+		return SR_ERR_ARG;
+	count = eyes17_clamp_count((size_t)limit);
+	if (tb8_out)
+		*tb8_out = tb8;
+	if (count_out)
+		*count_out = count;
+	return SR_OK;
+}
+
 size_t eyes17_build_capture_one(uint8_t *buf, uint16_t tb8, uint16_t count)
 {
 	if (!buf)

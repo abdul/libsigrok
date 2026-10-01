@@ -179,6 +179,44 @@ gboolean eyes17_calibration_load(const uint8_t *flash, size_t len)
 	return TRUE;
 }
 
+/*
+ * A1 symmetric range option (Task 6): golden select_range volts
+ * (eyes.py:select_range:1303), 1:1 onto PGA gain indices 0..7.
+ * Gain index 8 (external attenuator) has no range entry.
+ */
+static const char *eyes17_ranges[EYES17_NUM_RANGES] = {
+	"16", "8", "4", "2.5", "1.5", "1", "0.5", "0.25",
+};
+
+const char **eyes17_range_list(unsigned *n)
+{
+	if (n)
+		*n = ARRAY_SIZE(eyes17_ranges);
+	return eyes17_ranges;
+}
+
+const char *eyes17_range_text(int gain)
+{
+	if (gain < 0 || gain >= EYES17_NUM_RANGES)
+		return NULL;
+	return eyes17_ranges[gain];
+}
+
+int eyes17_range_to_gain(const char *s, int *gain_out)
+{
+	int g;
+
+	if (!s || !gain_out)
+		return SR_ERR_ARG;
+	for (g = 0; g < EYES17_NUM_RANGES; g++) {
+		if (strcmp(s, eyes17_ranges[g]) == 0) {
+			*gain_out = g;
+			return SR_OK;
+		}
+	}
+	return SR_ERR_ARG;
+}
+
 float eyes17_adc_to_volts(uint16_t raw, int gain)
 {
 	double x;

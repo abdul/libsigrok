@@ -296,12 +296,113 @@ START_TEST(test_valid_poly_used)
 }
 END_TEST
 
+/*
+ * Task 6 config-surface tests. Range strings are the golden
+ * eyes.py:select_range volts, 1:1 onto PGA gain indices 0..7.
+ */
+START_TEST(test_range_mapping)
+{
+	static const char *expect[] = {
+		"16", "8", "4", "2.5", "1.5", "1", "0.5", "0.25",
+	};
+	const char **list;
+	unsigned n, i;
+	int gain;
+
+	list = eyes17_range_list(&n);
+	ck_assert_uint_eq(n, 8);
+	for (i = 0; i < n; i++) {
+		ck_assert_str_eq(list[i], expect[i]);
+		ck_assert_int_eq(eyes17_range_to_gain(list[i], &gain), SR_OK);
+		ck_assert_int_eq(gain, (int)i);
+		ck_assert_str_eq(eyes17_range_text((int)i), expect[i]);
+	}
+}
+END_TEST
+
+START_TEST(test_range_reject)
+{
+	int gain = -1;
+
+	ck_assert_int_ne(eyes17_range_to_gain("160", &gain), SR_OK);
+	ck_assert_int_ne(eyes17_range_to_gain("", &gain), SR_OK);
+	ck_assert_int_ne(eyes17_range_to_gain(NULL, &gain), SR_OK);
+	ck_assert_int_ne(eyes17_range_to_gain("16", NULL), SR_OK);
+	/* Gain index 8 (external attenuator) has no range entry. */
+	ck_assert(!eyes17_range_text(8));
+	ck_assert(!eyes17_range_text(-1));
+	ck_assert(!eyes17_range_text(EYES17_NUM_RANGES));
+	ck_assert(!eyes17_gain_is_valid(8));
+}
+END_TEST
+
+START_TEST(test_resolution)
+{
+	ck_assert_int_eq(eyes17_check_resolution(10), SR_OK);
+	/* 12-bit is M6's: explicit SR_ERR, never silent fallback. */
+	ck_assert_int_eq(eyes17_check_resolution(12), SR_ERR);
+	ck_assert_int_eq(eyes17_check_resolution(8), SR_ERR_ARG);
+	ck_assert_int_eq(eyes17_check_resolution(16), SR_ERR_ARG);
+}
+END_TEST
+
+START_TEST(test_samplerate_ladder)
+{
+	const uint64_t *rates;
+	unsigned n, i;
+	uint16_t tb8;
+	uint64_t num, den;
+
+	rates = eyes17_samplerate_list(&n);
+	ck_assert(n > 0);
+	for (i = 0; i < n; i++) {
+		ck_assert_int_eq(eyes17_samplerate_to_tb8(rates[i],
+			&tb8), SR_OK);
+		/* Each entry is 8e6/tb8 for integer tb8 (Task-4 math). */
+		eyes17_tb8_to_rate(tb8, &num, &den);
+		ck_assert_uint_eq(num, 8000000);
+		ck_assert_uint_eq(rates[i], num / den);
+		ck_assert_uint_eq(tb8, (uint16_t)(num / rates[i]));
+	}
+	ck_assert_int_ne(eyes17_samplerate_to_tb8(0, &tb8), SR_OK);
+	ck_assert_int_ne(eyes17_samplerate_to_tb8(12345, &tb8), SR_OK);
+	ck_assert_int_ne(eyes17_samplerate_to_tb8(100001, &tb8), SR_OK);
+}
+END_TEST
+
+START_TEST(test_acquisition_check)
+{
+	uint16_t tb8, count;
+
+	/* Valid combo: 100 kHz (tb8 80), 100 samples, gain 0, 10-bit. */
+	ck_assert_int_eq(eyes17_check_acquisition(100000, 100, 0, 10,
+		&tb8, &count), SR_OK);
+	ck_assert_uint_eq(tb8, 80);
+	ck_assert_uint_eq(count, 100);
+	/* 12-bit rejected, never silently downgraded. */
+	ck_assert_int_eq(eyes17_check_acquisition(100000, 100, 0, 12,
+		&tb8, &count), SR_ERR);
+	/* Bad gain, off-ladder rate, and empty capture rejected. */
+	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 8, 10,
+		&tb8, &count), SR_OK);
+	ck_assert_int_ne(eyes17_check_acquisition(12345, 100, 0, 10,
+		&tb8, &count), SR_OK);
+	ck_assert_int_ne(eyes17_check_acquisition(100000, 0, 0, 10,
+		&tb8, &count), SR_OK);
+	/* Oversize clamps to EYES17_MAX_SAMPLES (Task-4 convention). */
+	ck_assert_int_eq(eyes17_check_acquisition(100000, 20000, 0, 10,
+		&tb8, &count), SR_OK);
+	ck_assert_uint_eq(count, 10000);
+}
+END_TEST
+
 Suite *suite_eyes17(void)
 {
 	Suite *s = suite_create("eyes17");
 	TCase *tc = tcase_create("protocol");
 	TCase *tt = tcase_create("timebase");
 	TCase *tk = tcase_create("calibration");
+	TCase *tg = tcase_create("config");
 	tcase_add_test(tc, test_u16_roundtrip);
 	tcase_add_test(tc, test_u32_roundtrip);
 	tcase_add_test(tc, test_version_ok);
@@ -318,8 +419,14 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tk, test_flash_unreadable_not_ready);
 	tcase_add_test(tk, test_deviation_rejected);
 	tcase_add_test(tk, test_valid_poly_used);
+	tcase_add_test(tg, test_range_mapping);
+	tcase_add_test(tg, test_range_reject);
+	tcase_add_test(tg, test_resolution);
+	tcase_add_test(tg, test_samplerate_ladder);
+	tcase_add_test(tg, test_acquisition_check);
 	suite_add_tcase(s, tc);
 	suite_add_tcase(s, tt);
 	suite_add_tcase(s, tk);
+	suite_add_tcase(s, tg);
 	return s;
 }

@@ -30,20 +30,66 @@ static const uint32_t drvopts[] = {
 };
 
 /*
- * Skeleton stubs. All of scan/config_set/config_list/dev_open/dev_close/
+ * All of scan/config_set/config_list/dev_open/dev_close/
  * dev_acquisition_start/dev_acquisition_stop must be non-NULL: this tree's
  * src/backend.c sanity_check_all_drivers() aborts sr_init() for the whole
- * library otherwise. Task 3+ fills these in; until then they are safe
- * no-ops (scan finds nothing, start refuses, open/close are the standard
- * serial helpers which are harmless with no devices present).
+ * library otherwise. scan probes the given conn for an ExpEYES17 firmware
+ * string; dev_open/dev_close are the standard serial helpers.
  * config_get/config_channel_set/config_commit are genuinely optional and
  * stay NULL.
  */
 static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 {
-	(void)driver;
-	(void)options;
-	return NULL;
+	struct sr_dev_inst *sdi;
+	struct dev_context *devc;
+	struct sr_config *src;
+	struct sr_serial_dev_inst *serial;
+	GSList *l;
+	const char *conn, *serialcomm;
+
+	conn = NULL;
+	serialcomm = "500000/8n1";
+	for (l = options; l; l = l->next) {
+		src = l->data;
+		switch (src->key) {
+		case SR_CONF_CONN:
+			conn = g_variant_get_string(src->data, NULL);
+			break;
+		case SR_CONF_SERIALCOMM:
+			serialcomm = g_variant_get_string(src->data, NULL);
+			break;
+		}
+	}
+	if (!conn)
+		return NULL;
+
+	serial = sr_serial_dev_inst_new(conn, serialcomm);
+	if (serial_open(serial, SERIAL_RDWR) != SR_OK) {
+		sr_serial_dev_inst_free(serial);
+		return NULL;
+	}
+
+	devc = g_malloc0(sizeof(*devc));
+	if (eyes17_get_version(serial, &devc->fw) != SR_OK) {
+		g_free(devc);
+		serial_close(serial);
+		sr_serial_dev_inst_free(serial);
+		return NULL;
+	}
+	serial_close(serial);
+
+	sdi = g_malloc0(sizeof(*sdi));
+	sdi->status = SR_ST_INACTIVE;
+	sdi->vendor = g_strdup("ExpEYES");
+	sdi->model = g_strdup("17");
+	sdi->version = g_strdup(devc->fw.raw);
+	sdi->inst_type = SR_INST_SERIAL;
+	sdi->conn = serial;
+	sdi->priv = devc;
+	devc->serial = serial;
+	sr_channel_new(sdi, 0, SR_CHANNEL_ANALOG, TRUE, "A1");
+
+	return std_scan_complete(driver, g_slist_append(NULL, sdi));
 }
 
 static int config_set(uint32_t key, GVariant *data,

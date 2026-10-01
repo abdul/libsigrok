@@ -53,5 +53,9 @@ SR_PRIV void eyes17_put_u32_le(uint8_t *p, uint32_t v);
 SR_PRIV uint16_t eyes17_get_u16_le(const uint8_t *p);
 SR_PRIV uint32_t eyes17_get_u32_le(const uint8_t *p);
 SR_PRIV int eyes17_parse_version(const char *s, struct eyes17_version *out);
+SR_PRIV int eyes17_send_cmd(struct sr_serial_dev_inst *serial, uint8_t hdr,
+		uint8_t sub, const uint8_t *args, size_t arglen);
+SR_PRIV int eyes17_get_version(struct sr_serial_dev_inst *serial,
+		struct eyes17_version *out);
 
 #endif

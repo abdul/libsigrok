@@ -76,6 +76,16 @@ SR_PRIV uint16_t eyes17_clamp_count(size_t count);
 SR_PRIV size_t eyes17_build_capture_one(uint8_t *buf, uint16_t tb8,
 		uint16_t count);
 SR_PRIV float eyes17_adc_to_volts(uint16_t raw, int gain);
+
+/* Gain table, ideal curve, flash discipline (calibration.c). Gain
+ * index 8 is external-attenuator-only and rejected from the normal path. */
+#define EYES17_GAIN_NORMAL_MAX 7
+#define EYES17_GAIN_EXTERNAL 8
+SR_PRIV double eyes17_gain_factor(int gain);
+SR_PRIV gboolean eyes17_gain_is_valid(int gain);
+SR_PRIV float eyes17_adc_to_volts_ideal(uint16_t raw, int gain);
+SR_PRIV gboolean eyes17_calibration_is_ready(void);
+SR_PRIV gboolean eyes17_calibration_load(const uint8_t *flash, size_t len);
 SR_PRIV int eyes17_capture_one(struct sr_serial_dev_inst *serial,
 		uint16_t tb8, uint16_t count, int gain, float *volts_out);
 

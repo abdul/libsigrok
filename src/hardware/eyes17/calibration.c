@@ -18,15 +18,178 @@
  */
 
 #include <config.h>
+#include <math.h>
+#include <string.h>
 #include "protocol.h"
 
 /*
- * Temporary Task 4 stub. Task 5 owns the gain table, ideal curves, and
- * flash discipline behind this exact signature; no curve is modeled here.
+ * A1 gain index -> factor. Golden: achan.py:4 gains list; HARDWARE.md
+ * documents index 8 as the external-attenuator mode (10 MΩ series,
+ * eyes.py:set_gain:1260), so the normal path carries a 0.0 sentinel
+ * there and rejects it. Only A1/A2 have PGA gain (HARDWARE.md pin map).
  */
+static const double eyes17_gain_factors[] = { 1, 2, 4, 5, 8, 10, 16, 32, 0.0 };
+
+/* A1 uncalibrated input range, golden achan.py:18 inputRanges['A1'].
+ * Inverted op-amp: raw ADC 0 maps to +16.5 V, full scale to -16.5 V. */
+#define EYES17_A1_HI 16.5
+#define EYES17_A1_LO -16.5
+#define EYES17_ADC10_FULL 1023.0
+#define EYES17_ADC12_FULL 4095.0
+
+/* Per-gain deviation rejection, golden achan.py:loadPolynomials:103. */
+#define EYES17_CAL_MAX_DEVIATION_PCT 30.0
+
+/* Flash bulk payload markers, golden eyes.py:__runInitSequence__:238-249
+ * ('ExpEYES' magic, per-channel '>|name|<' sections, 'STOP' terminator). */
+#define EYES17_FLASH_MAGIC "ExpEYES"
+#define EYES17_FLASH_MAGIC_LEN 7
+#define EYES17_FLASH_A1_MARKER ">|A1|<"
+#define EYES17_FLASH_A1_MARKER_LEN 6
+#define EYES17_FLASH_STOP "STOP"
+#define EYES17_FLASH_STOP_LEN 4
+#define EYES17_FLASH_POLY_LEN 12
+
+/* Stored flash polynomials: quadratic c2*x^2 + c1*x + c0 per normal gain
+ * index (golden struct.unpack('3f') triples, eyes.py:__runInitSequence__:265).
+ * The 10-bit path scales raw into the 12-bit domain first, matching the
+ * golden __cal10__ (achan.py:158). */
+static double eyes17_cal_polys[8][3];
+static gboolean eyes17_cal_use_poly[8];
+static gboolean eyes17_calibration_ready = FALSE;
+
+double eyes17_gain_factor(int gain)
+{
+	if (gain < 0 || gain > EYES17_GAIN_EXTERNAL)
+		return 0.0;
+	return eyes17_gain_factors[gain];
+}
+
+gboolean eyes17_gain_is_valid(int gain)
+{
+	return gain >= 0 && gain <= EYES17_GAIN_NORMAL_MAX;
+}
+
+/*
+ * Ideal 10-bit A1 curve: golden regenerateCalibration else-branch
+ * (achan.py:147): calPoly10 = [0, slope/1023, intercept] with
+ * slope/intercept scaled by the PGA factor.
+ */
+float eyes17_adc_to_volts_ideal(uint16_t raw, int gain)
+{
+	double f, span;
+
+	if (!eyes17_gain_is_valid(gain))
+		return NAN;
+	f = eyes17_gain_factors[gain];
+	span = (EYES17_A1_HI - EYES17_A1_LO) / f;
+	return (float)(EYES17_A1_HI / f - span * raw / EYES17_ADC10_FULL);
+}
+
+gboolean eyes17_calibration_is_ready(void)
+{
+	return eyes17_calibration_ready;
+}
+
+static double eyes17_ideal_at_12bit(int gain, double x)
+{
+	double f = eyes17_gain_factors[gain];
+	double span = (EYES17_A1_HI - EYES17_A1_LO) / f;
+
+	return EYES17_A1_HI / f - span * x / EYES17_ADC12_FULL;
+}
+
+static const uint8_t *eyes17_find_marker(const uint8_t *p, size_t len,
+		const char *marker, size_t mlen)
+{
+	size_t i;
+
+	if (len < mlen)
+		return NULL;
+	for (i = 0; i + mlen <= len; i++) {
+		if (memcmp(p + i, marker, mlen) == 0)
+			return p + i;
+	}
+	return NULL;
+}
+
+static void eyes17_calibration_clear(void)
+{
+	int g;
+
+	for (g = 0; g <= EYES17_GAIN_NORMAL_MAX; g++)
+		eyes17_cal_use_poly[g] = FALSE;
+	eyes17_calibration_ready = FALSE;
+}
+
+/*
+ * Validate a flash bulk payload and install its A1 polynomials. Returns
+ * the calibrationReady flag: FALSE on any unreadable input (and the
+ * driver keeps serving the ideal curve, never calibrated output).
+ * Per-gain entries deviating >30% from ideal at full scale fall back
+ * to the ideal curve (golden loadPolynomials rule).
+ */
+gboolean eyes17_calibration_load(const uint8_t *flash, size_t len)
+{
+	const uint8_t *mark, *stop, *p;
+	size_t avail, n, g;
+	float triple[3];
+	double c2, c1, c0, fit, ideal, err;
+
+	eyes17_calibration_clear();
+	if (!flash || len < EYES17_FLASH_MAGIC_LEN)
+		return FALSE;
+	if (memcmp(flash, EYES17_FLASH_MAGIC, EYES17_FLASH_MAGIC_LEN) != 0)
+		return FALSE;
+	mark = eyes17_find_marker(flash, len,
+		EYES17_FLASH_A1_MARKER, EYES17_FLASH_A1_MARKER_LEN);
+	if (!mark)
+		return FALSE;
+	p = mark + EYES17_FLASH_A1_MARKER_LEN;
+	avail = (size_t)(flash + len - p);
+	stop = eyes17_find_marker(p, avail,
+		EYES17_FLASH_STOP, EYES17_FLASH_STOP_LEN);
+	if (stop)
+		avail = (size_t)(stop - p);
+	n = avail / EYES17_FLASH_POLY_LEN;
+	if (n > 8)
+		n = 8;
+	if (n == 0)
+		return FALSE;
+	for (g = 0; g < n; g++) {
+		memcpy(triple, p + g * EYES17_FLASH_POLY_LEN,
+			EYES17_FLASH_POLY_LEN);
+		c2 = triple[0];
+		c1 = triple[1];
+		c0 = triple[2];
+		fit = c2 * EYES17_ADC12_FULL * EYES17_ADC12_FULL +
+			c1 * EYES17_ADC12_FULL + c0;
+		ideal = eyes17_ideal_at_12bit((int)g, EYES17_ADC12_FULL);
+		if (ideal == 0.0)
+			continue;
+		err = 100.0 * fabs((fit - ideal) / ideal);
+		if (err > EYES17_CAL_MAX_DEVIATION_PCT)
+			continue;
+		eyes17_cal_polys[g][0] = c2;
+		eyes17_cal_polys[g][1] = c1;
+		eyes17_cal_polys[g][2] = c0;
+		eyes17_cal_use_poly[g] = TRUE;
+	}
+	eyes17_calibration_ready = TRUE;
+	return TRUE;
+}
+
 float eyes17_adc_to_volts(uint16_t raw, int gain)
 {
-	(void)raw;
-	(void)gain;
-	return 0.0f;
+	double x;
+
+	if (!eyes17_gain_is_valid(gain))
+		return NAN;
+	if (eyes17_calibration_ready && eyes17_cal_use_poly[gain]) {
+		x = raw * EYES17_ADC12_FULL / EYES17_ADC10_FULL;
+		return (float)(eyes17_cal_polys[gain][0] * x * x +
+			eyes17_cal_polys[gain][1] * x +
+			eyes17_cal_polys[gain][2]);
+	}
+	return eyes17_adc_to_volts_ideal(raw, gain);
 }

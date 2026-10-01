@@ -18,6 +18,7 @@
  */
 
 #include <config.h>
+#include <math.h>
 #include <string.h>
 #include <check.h>
 #include <libsigrok/libsigrok.h>
@@ -152,11 +153,155 @@ int serial_readline(struct sr_serial_dev_inst *serial,
 	return SR_ERR;
 }
 
+/*
+ * Task 5 calibration tests. Golden refs (via docs/HARDWARE.md):
+ * - gains list / inputRanges: achan.py:4 / achan.py:18
+ * - >30% deviation rejection: achan.py:loadPolynomials:103
+ * - READY-tagged flash polys: eyes.py:__runInitSequence__:210-279
+ * - A1 inverted op-amp range +16.5..-16.5 V: HARDWARE.md pin map
+ */
+START_TEST(test_gain_table)
+{
+	static const double expect[] = { 1, 2, 4, 5, 8, 10, 16, 32 };
+	int i;
+
+	for (i = 0; i < 8; i++) {
+		ck_assert(eyes17_gain_is_valid(i));
+		ck_assert(fabs(eyes17_gain_factor(i) - expect[i]) < 1e-12);
+	}
+	/* Index 8 is external-attenuator-only: rejected from normal path. */
+	ck_assert(!eyes17_gain_is_valid(8));
+	ck_assert(fabs(eyes17_gain_factor(8)) < 1e-12);
+	ck_assert(!eyes17_gain_is_valid(-1));
+	ck_assert(!eyes17_gain_is_valid(9));
+}
+END_TEST
+
+START_TEST(test_ideal_midscale)
+{
+	/* 1 LSB at gain x1 over the 33 V span. */
+	const float lsb = (float)(33.0 / 1023.0);
+
+	eyes17_calibration_load(NULL, 0);
+	ck_assert(fabsf(eyes17_adc_to_volts_ideal(511, 0)) <= lsb);
+	ck_assert(fabsf(eyes17_adc_to_volts_ideal(512, 0)) <= lsb);
+	ck_assert(fabsf(eyes17_adc_to_volts(511, 0)) <= lsb);
+}
+END_TEST
+
+START_TEST(test_ideal_endpoints)
+{
+	float hi, lo, hi2;
+
+	eyes17_calibration_load(NULL, 0);
+	hi = eyes17_adc_to_volts_ideal(0, 0);
+	lo = eyes17_adc_to_volts_ideal(1023, 0);
+	ck_assert(fabsf(hi - 16.5f) / 16.5f < 0.01f);
+	ck_assert(fabsf(lo + 16.5f) / 16.5f < 0.01f);
+	/* PGA scaling: gain index 1 (x2) halves the span. */
+	hi2 = eyes17_adc_to_volts_ideal(0, 1);
+	ck_assert(fabsf(hi2 - 8.25f) / 8.25f < 0.01f);
+}
+END_TEST
+
+START_TEST(test_gain8_rejected)
+{
+	eyes17_calibration_load(NULL, 0);
+	ck_assert(isnan(eyes17_adc_to_volts_ideal(512, 8)));
+	ck_assert(isnan(eyes17_adc_to_volts(512, 8)));
+	ck_assert(isnan(eyes17_adc_to_volts(512, -1)));
+	ck_assert(isnan(eyes17_adc_to_volts(512, 9)));
+}
+END_TEST
+
+START_TEST(test_flash_unreadable_not_ready)
+{
+	static const uint8_t junk[] = { 'n', 'o', 'p', 'e' };
+
+	ck_assert(!eyes17_calibration_load(NULL, 0));
+	ck_assert(!eyes17_calibration_is_ready());
+	ck_assert(!eyes17_calibration_load(junk, sizeof(junk)));
+	ck_assert(!eyes17_calibration_is_ready());
+	/* Falls back to ideal; never claims calibrated output. */
+	ck_assert(fabsf(eyes17_adc_to_volts(512, 0)) <=
+		(float)(33.0 / 1023.0));
+}
+END_TEST
+
+static size_t build_flash_blob(uint8_t *buf, const float polys[8][3])
+{
+	static const char magic[] = "ExpEYES17-test\n";
+	static const char marker[] = ">|A1|<";
+	static const char stop[] = "STOP";
+	size_t n = 0;
+	int g;
+
+	memcpy(buf + n, magic, sizeof(magic) - 1);
+	n += sizeof(magic) - 1;
+	memcpy(buf + n, marker, sizeof(marker) - 1);
+	n += sizeof(marker) - 1;
+	for (g = 0; g < 8; g++) {
+		memcpy(buf + n, polys[g], 12);
+		n += 12;
+	}
+	memcpy(buf + n, stop, sizeof(stop) - 1);
+	n += sizeof(stop) - 1;
+	return n;
+}
+
+static void ideal_polys(float polys[8][3])
+{
+	int g;
+
+	for (g = 0; g < 8; g++) {
+		double f = eyes17_gain_factor(g);
+		polys[g][0] = 0.0f;
+		polys[g][1] = (float)(-33.0 / f / 4095.0);
+		polys[g][2] = (float)(16.5 / f);
+	}
+}
+
+START_TEST(test_deviation_rejected)
+{
+	uint8_t blob[256];
+	float polys[8][3];
+	float v;
+
+	/* Gain 0 offset +10 V: 60.6% deviation at full scale, must
+	 * fall back to the ideal curve. */
+	ideal_polys(polys);
+	polys[0][2] += 10.0f;
+	ck_assert(eyes17_calibration_load(blob,
+		build_flash_blob(blob, polys)));
+	ck_assert(eyes17_calibration_is_ready());
+	v = eyes17_adc_to_volts(0, 0);
+	ck_assert(fabsf(v - 16.5f) / 16.5f < 0.01f);
+}
+END_TEST
+
+START_TEST(test_valid_poly_used)
+{
+	uint8_t blob[256];
+	float polys[8][3];
+	float v;
+
+	/* Gain 0 offset +0.1 V: 0.6% deviation, stored and used. */
+	ideal_polys(polys);
+	polys[0][2] += 0.1f;
+	ck_assert(eyes17_calibration_load(blob,
+		build_flash_blob(blob, polys)));
+	ck_assert(eyes17_calibration_is_ready());
+	v = eyes17_adc_to_volts(0, 0);
+	ck_assert(fabsf(v - 16.6f) < 0.02f);
+}
+END_TEST
+
 Suite *suite_eyes17(void)
 {
 	Suite *s = suite_create("eyes17");
 	TCase *tc = tcase_create("protocol");
 	TCase *tt = tcase_create("timebase");
+	TCase *tk = tcase_create("calibration");
 	tcase_add_test(tc, test_u16_roundtrip);
 	tcase_add_test(tc, test_u32_roundtrip);
 	tcase_add_test(tc, test_version_ok);
@@ -166,7 +311,15 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tt, test_timebase_10us);
 	tcase_add_test(tt, test_count_cap);
 	tcase_add_test(tt, test_capture_one_frame);
+	tcase_add_test(tk, test_gain_table);
+	tcase_add_test(tk, test_ideal_midscale);
+	tcase_add_test(tk, test_ideal_endpoints);
+	tcase_add_test(tk, test_gain8_rejected);
+	tcase_add_test(tk, test_flash_unreadable_not_ready);
+	tcase_add_test(tk, test_deviation_rejected);
+	tcase_add_test(tk, test_valid_poly_used);
 	suite_add_tcase(s, tc);
 	suite_add_tcase(s, tt);
+	suite_add_tcase(s, tk);
 	return s;
 }

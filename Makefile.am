@@ -898,6 +898,17 @@ tests_main_SOURCES = \
 	tests/analog.c \
 	tests/conv.c
 
+if HW_EYES17
+# protocol.c is compiled into tests/main as well: its SR_PRIV
+# symbols are hidden in the shared lib, so the eyes17 unit tests
+# cannot link against libsigrok.la for them. The per-target CFLAGS
+# keep this copy separate from the libtool objects in libdrivers.
+tests_main_SOURCES += \
+	tests/eyes17.c \
+	src/hardware/eyes17/protocol.c
+tests_main_CFLAGS = $(AM_CFLAGS)
+endif
+
 tests_main_LDADD = libsigrok.la $(SR_EXTRA_LIBS) $(TESTS_LIBS)
 
 BUILD_EXTRA =

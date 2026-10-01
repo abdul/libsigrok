@@ -43,6 +43,7 @@ GArray *srtest_get_enabled_logic_channels(const struct sr_dev_inst *sdi);
 
 Suite *suite_core(void);
 Suite *suite_driver_all(void);
+Suite *suite_eyes17(void);
 Suite *suite_input_all(void);
 Suite *suite_input_binary(void);
 Suite *suite_output_all(void);

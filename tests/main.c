@@ -35,6 +35,7 @@ int main(void)
 	/* Add all testsuites to the master suite. */
 	srunner_add_suite(srunner, suite_core());
 	srunner_add_suite(srunner, suite_driver_all());
+	srunner_add_suite(srunner, suite_eyes17());
 	srunner_add_suite(srunner, suite_input_all());
 	srunner_add_suite(srunner, suite_input_binary());
 	srunner_add_suite(srunner, suite_output_all());

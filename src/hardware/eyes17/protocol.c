@@ -27,7 +27,8 @@
 static int eyes17_read_ack(struct sr_serial_dev_inst *serial)
 {
 	uint8_t ack;
-	if (serial_read_blocking(serial, &ack, 1, 1000) != 1)
+	if (serial_read_blocking(serial, &ack, 1,
+			EYES17_ACK_TIMEOUT_MS) != 1)
 		return SR_ERR_TIMEOUT;
 	return ((ack & EYES17_ACK_MASK) == EYES17_ACK_OK) ? SR_OK : SR_ERR_DATA;
 }
@@ -41,7 +42,8 @@ int eyes17_send_cmd(struct sr_serial_dev_inst *serial, uint8_t hdr,
 	buf[0] = hdr;
 	buf[1] = sub;
 	memcpy(buf + 2, args, arglen);
-	if (serial_write_blocking(serial, buf, arglen + 2, 100) != (int)(arglen + 2))
+	if (serial_write_blocking(serial, buf, arglen + 2,
+			EYES17_WRITE_TIMEOUT_MS) != (int)(arglen + 2))
 		return SR_ERR_IO;
 	return eyes17_read_ack(serial);
 }
@@ -57,7 +59,8 @@ int eyes17_get_version(struct sr_serial_dev_inst *serial,
 			EYES17_SUB_GET_VERSION, &dummy, 0) != SR_OK)
 		return SR_ERR_IO;
 	buf = g_malloc0(buflen);
-	ret = serial_readline(serial, &buf, &buflen, 1000);
+	ret = serial_readline(serial, &buf, &buflen,
+		EYES17_READLINE_TIMEOUT_MS);
 	if (ret == SR_OK && buflen > 0)
 		ret = eyes17_parse_version(buf, out);
 	else

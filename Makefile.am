@@ -905,7 +905,9 @@ if HW_EYES17
 # keep this copy separate from the libtool objects in libdrivers.
 tests_main_SOURCES += \
 	tests/eyes17.c \
-	src/hardware/eyes17/protocol.c
+	src/hardware/eyes17/protocol.c \
+	src/hardware/eyes17/acquisition.c \
+	src/hardware/eyes17/calibration.c
 tests_main_CFLAGS = $(AM_CFLAGS)
 endif
 

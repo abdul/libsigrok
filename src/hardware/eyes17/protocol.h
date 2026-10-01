@@ -36,6 +36,19 @@
 #define EYES17_HDR_COMMON 11
 #define EYES17_SUB_GET_VERSION 5
 
+/* Transport timeouts. */
+#define EYES17_ACK_TIMEOUT_MS 1000
+#define EYES17_WRITE_TIMEOUT_MS 100
+#define EYES17_READLINE_TIMEOUT_MS 1000
+
+/* Timebase and single-channel capture (acquisition.c). ADC tick is 8 MHz. */
+#define EYES17_ADC_CLOCK_HZ 8000000ULL
+#define EYES17_TIMEBASE_MIN_US 1.5
+#define EYES17_TB8_MIN 12
+#define EYES17_CHOSA_A1 3
+#define EYES17_CAPTURE_FRAME_LEN 7
+#define EYES17_CAPTURE_TIMEOUT_MS 2000
+
 struct eyes17_version {
 	char raw[32];
 	int major;
@@ -57,5 +70,13 @@ SR_PRIV int eyes17_send_cmd(struct sr_serial_dev_inst *serial, uint8_t hdr,
 		uint8_t sub, const uint8_t *args, size_t arglen);
 SR_PRIV int eyes17_get_version(struct sr_serial_dev_inst *serial,
 		struct eyes17_version *out);
+SR_PRIV uint16_t eyes17_timebase_to_tb8(double timebase_us);
+SR_PRIV void eyes17_tb8_to_rate(uint16_t tb8, uint64_t *num, uint64_t *den);
+SR_PRIV uint16_t eyes17_clamp_count(size_t count);
+SR_PRIV size_t eyes17_build_capture_one(uint8_t *buf, uint16_t tb8,
+		uint16_t count);
+SR_PRIV float eyes17_adc_to_volts(uint16_t raw, int gain);
+SR_PRIV int eyes17_capture_one(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, float *volts_out);
 
 #endif

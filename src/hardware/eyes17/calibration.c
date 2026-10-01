@@ -19,3 +19,14 @@
 
 #include <config.h>
 #include "protocol.h"
+
+/*
+ * Temporary Task 4 stub. Task 5 owns the gain table, ideal curves, and
+ * flash discipline behind this exact signature; no curve is modeled here.
+ */
+float eyes17_adc_to_volts(uint16_t raw, int gain)
+{
+	(void)raw;
+	(void)gain;
+	return 0.0f;
+}

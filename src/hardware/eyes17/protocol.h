@@ -33,6 +33,8 @@
 /* Protocol headers (from golden commands_proto.py mapping). */
 #define EYES17_HDR_ADC 2
 #define EYES17_SUB_CAPTURE_ONE 1
+#define EYES17_SUB_GET_CAPTURE_STATUS 6
+#define EYES17_SUB_GET_CAPTURE_CHANNEL 7
 #define EYES17_HDR_COMMON 11
 #define EYES17_SUB_GET_VERSION 5
 
@@ -47,6 +49,10 @@
 #define EYES17_TB8_MIN 12
 #define EYES17_CHOSA_A1 3
 #define EYES17_CAPTURE_FRAME_LEN 7
+#define EYES17_FETCH_FRAME_LEN 7
+/* Golden DATA_SPLITTING (eyes.py:116 via commands_proto.py:10): the
+ * firmware serves at most this many samples per GET_CAPTURE_CHANNEL. */
+#define EYES17_FETCH_CHUNK 200
 #define EYES17_CAPTURE_TIMEOUT_MS 2000
 
 struct eyes17_version {
@@ -82,6 +88,9 @@ SR_PRIV uint32_t eyes17_get_u32_le(const uint8_t *p);
 SR_PRIV int eyes17_parse_version(const char *s, struct eyes17_version *out);
 SR_PRIV int eyes17_send_cmd(struct sr_serial_dev_inst *serial, uint8_t hdr,
 		uint8_t sub, const uint8_t *args, size_t arglen);
+SR_PRIV int eyes17_write_cmd(struct sr_serial_dev_inst *serial, uint8_t hdr,
+		uint8_t sub, const uint8_t *args, size_t arglen);
+SR_PRIV int eyes17_read_ack(struct sr_serial_dev_inst *serial);
 SR_PRIV int eyes17_get_version(struct sr_serial_dev_inst *serial,
 		struct eyes17_version *out);
 SR_PRIV uint16_t eyes17_timebase_to_tb8(double timebase_us);
@@ -89,6 +98,8 @@ SR_PRIV void eyes17_tb8_to_rate(uint16_t tb8, uint64_t *num, uint64_t *den);
 SR_PRIV uint16_t eyes17_clamp_count(size_t count);
 SR_PRIV size_t eyes17_build_capture_one(uint8_t *buf, uint16_t tb8,
 		uint16_t count);
+SR_PRIV size_t eyes17_build_fetch_channel(uint8_t *buf, uint16_t n,
+		uint16_t offset);
 SR_PRIV float eyes17_adc_to_volts(uint16_t raw, int gain);
 
 /* Gain table, ideal curve, flash discipline (calibration.c). Gain

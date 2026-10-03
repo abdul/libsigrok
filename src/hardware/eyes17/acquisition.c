@@ -128,6 +128,10 @@ int eyes17_check_acquisition(uint64_t samplerate, uint64_t limit,
 	return SR_OK;
 }
 
+/*
+ * Golden eyes.py:capture_traces: CAPTURE_ONE takes the sample count
+ * first and the timebase second: [ADC, CAPTURE_ONE, CHOSA, n, tb8].
+ */
 size_t eyes17_build_capture_one(uint8_t *buf, uint16_t tb8, uint16_t count)
 {
 	if (!buf)
@@ -135,24 +139,79 @@ size_t eyes17_build_capture_one(uint8_t *buf, uint16_t tb8, uint16_t count)
 	buf[0] = EYES17_HDR_ADC;
 	buf[1] = EYES17_SUB_CAPTURE_ONE;
 	buf[2] = EYES17_CHOSA_A1;
-	eyes17_put_u16_le(buf + 3, tb8);
-	eyes17_put_u16_le(buf + 5, count);
+	eyes17_put_u16_le(buf + 3, count);
+	eyes17_put_u16_le(buf + 5, tb8);
 	return EYES17_CAPTURE_FRAME_LEN;
 }
 
 /*
+ * Golden eyes.py:__fetch_channel__: the firmware holds captured data
+ * for the host to pull: [ADC, GET_CAPTURE_CHANNEL, channel0, n, off]
+ * (channel 0-based, n samples from offset off), then 2 x n bulk bytes
+ * plus an ACK. At most EYES17_FETCH_CHUNK samples per fetch.
+ */
+size_t eyes17_build_fetch_channel(uint8_t *buf, uint16_t n, uint16_t offset)
+{
+	if (!buf)
+		return 0;
+	buf[0] = EYES17_HDR_ADC;
+	buf[1] = EYES17_SUB_GET_CAPTURE_CHANNEL;
+	buf[2] = 0;
+	eyes17_put_u16_le(buf + 3, n);
+	eyes17_put_u16_le(buf + 5, offset);
+	return EYES17_FETCH_FRAME_LEN;
+}
+
+/*
+ * Poll GET_CAPTURE_STATUS until the conversion-done bit sets or the
+ * deadline passes. The reply is data-then-ACK like GET_VOLTAGE
+ * (done byte, samples u16, ACK), so the frame is written raw.
+ */
+static int eyes17_wait_conversion(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count)
+{
+	uint64_t conv_ms;
+	gint64 deadline;
+	uint8_t reply[3];
+
+	/* Conversion takes count x tb8 / 8 MHz, plus headroom. */
+	conv_ms = (uint64_t)count * tb8 / 8000;
+	deadline = g_get_monotonic_time() +
+		(2000 + conv_ms + 1000) * 1000;
+	for (;;) {
+		if (eyes17_write_cmd(serial, EYES17_HDR_ADC,
+				EYES17_SUB_GET_CAPTURE_STATUS,
+				NULL, 0) != SR_OK)
+			return SR_ERR_IO;
+		if (serial_read_blocking(serial, reply, sizeof(reply),
+				EYES17_ACK_TIMEOUT_MS) != sizeof(reply))
+			return SR_ERR_TIMEOUT;
+		if (eyes17_read_ack(serial) != SR_OK)
+			return SR_ERR_DATA;
+		if (reply[0] & 0x01)
+			return SR_OK;
+		if (g_get_monotonic_time() >= deadline)
+			return SR_ERR_TIMEOUT;
+		g_usleep(10000);
+	}
+}
+
+/*
  * Single-channel immediate capture (trigger-disabled path): send
- * CAPTURE_ONE for A1, then fetch the 2 x count-byte bulk reply and
- * decode it to volts. Triggered captures land in Plan 2 (M3); no
- * trigger-setup command exists on this path, so there is nothing to
- * configure here beyond using the immediate single-shot command.
+ * CAPTURE_ONE for A1, wait for conversion, then pull the samples with
+ * GET_CAPTURE_CHANNEL fetches and decode them to volts. Triggered
+ * captures land in Plan 2 (M3); no trigger-setup command exists on
+ * this path, so there is nothing to configure here beyond using the
+ * immediate single-shot command.
  */
 int eyes17_capture_one(struct sr_serial_dev_inst *serial,
 		uint16_t tb8, uint16_t count, int gain, float *volts_out)
 {
 	uint8_t args[5];
+	uint8_t fetch[5];
 	uint8_t *raw;
-	size_t i, nbytes;
+	uint16_t got, n;
+	size_t i;
 	int ret;
 
 	if (!serial || !volts_out || count == 0)
@@ -161,22 +220,41 @@ int eyes17_capture_one(struct sr_serial_dev_inst *serial,
 		tb8 = EYES17_TB8_MIN;
 	count = eyes17_clamp_count(count);
 	args[0] = EYES17_CHOSA_A1;
-	eyes17_put_u16_le(args + 1, tb8);
-	eyes17_put_u16_le(args + 3, count);
+	eyes17_put_u16_le(args + 1, count);
+	eyes17_put_u16_le(args + 3, tb8);
 	ret = eyes17_send_cmd(serial, EYES17_HDR_ADC,
 		EYES17_SUB_CAPTURE_ONE, args, sizeof(args));
 	if (ret != SR_OK)
 		return ret;
-	nbytes = (size_t)count * 2;
-	raw = g_malloc(nbytes);
-	if (serial_read_blocking(serial, raw, nbytes,
-			EYES17_CAPTURE_TIMEOUT_MS) != (int)nbytes) {
-		g_free(raw);
-		return SR_ERR_TIMEOUT;
+	ret = eyes17_wait_conversion(serial, tb8, count);
+	if (ret != SR_OK)
+		return ret;
+	raw = g_malloc(EYES17_FETCH_CHUNK * 2);
+	got = 0;
+	while (got < count) {
+		n = count - got;
+		if (n > EYES17_FETCH_CHUNK)
+			n = EYES17_FETCH_CHUNK;
+		fetch[0] = 0;
+		eyes17_put_u16_le(fetch + 1, n);
+		eyes17_put_u16_le(fetch + 3, got);
+		ret = eyes17_write_cmd(serial, EYES17_HDR_ADC,
+			EYES17_SUB_GET_CAPTURE_CHANNEL, fetch, sizeof(fetch));
+		if (ret != SR_OK)
+			break;
+		if (serial_read_blocking(serial, raw, (size_t)n * 2,
+				EYES17_CAPTURE_TIMEOUT_MS) != (int)((size_t)n * 2)) {
+			ret = SR_ERR_TIMEOUT;
+			break;
+		}
+		ret = eyes17_read_ack(serial);
+		if (ret != SR_OK)
+			break;
+		for (i = 0; i < n; i++)
+			volts_out[got + i] = eyes17_adc_to_volts(
+				eyes17_get_u16_le(raw + 2 * i), gain);
+		got += n;
 	}
-	for (i = 0; i < count; i++)
-		volts_out[i] = eyes17_adc_to_volts(
-			eyes17_get_u16_le(raw + 2 * i), gain);
 	g_free(raw);
-	return SR_OK;
+	return ret;
 }

@@ -100,11 +100,29 @@ START_TEST(test_count_cap)
 }
 END_TEST
 
+/*
+ * Golden eyes.py:capture_traces: CAPTURE_ONE takes the sample count
+ * first and the timebase second: [ADC, CAPTURE_ONE, CHOSA, n, tb8].
+ */
 START_TEST(test_capture_one_frame)
 {
 	uint8_t buf[EYES17_CAPTURE_FRAME_LEN];
-	uint8_t expect[] = { 2, 1, 3, 0x50, 0x00, 0x64, 0x00 };
+	uint8_t expect[] = { 2, 1, 3, 0x64, 0x00, 0x50, 0x00 };
 	ck_assert_uint_eq(eyes17_build_capture_one(buf, 80, 100),
+		sizeof(expect));
+	ck_assert_int_eq(memcmp(buf, expect, sizeof(expect)), 0);
+}
+END_TEST
+
+/*
+ * Golden eyes.py:__fetch_channel__: [ADC, GET_CAPTURE_CHANNEL,
+ * channel0, n, offset]; channel 0 is the first buffered channel.
+ */
+START_TEST(test_fetch_channel_frame)
+{
+	uint8_t buf[EYES17_FETCH_FRAME_LEN];
+	uint8_t expect[] = { 2, 7, 0, 0xC8, 0x00, 0x00, 0x00 };
+	ck_assert_uint_eq(eyes17_build_fetch_channel(buf, 200, 0),
 		sizeof(expect));
 	ck_assert_int_eq(memcmp(buf, expect, sizeof(expect)), 0);
 }
@@ -412,6 +430,7 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tt, test_timebase_10us);
 	tcase_add_test(tt, test_count_cap);
 	tcase_add_test(tt, test_capture_one_frame);
+	tcase_add_test(tt, test_fetch_channel_frame);
 	tcase_add_test(tk, test_gain_table);
 	tcase_add_test(tk, test_ideal_midscale);
 	tcase_add_test(tk, test_ideal_endpoints);

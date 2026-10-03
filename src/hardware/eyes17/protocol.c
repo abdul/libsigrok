@@ -24,7 +24,7 @@
 #define EYES17_ACK_MASK 0x03
 #define EYES17_ACK_OK 0x01
 
-static int eyes17_read_ack(struct sr_serial_dev_inst *serial)
+int eyes17_read_ack(struct sr_serial_dev_inst *serial)
 {
 	uint8_t ack;
 	if (serial_read_blocking(serial, &ack, 1,
@@ -33,7 +33,7 @@ static int eyes17_read_ack(struct sr_serial_dev_inst *serial)
 	return ((ack & EYES17_ACK_MASK) == EYES17_ACK_OK) ? SR_OK : SR_ERR_DATA;
 }
 
-int eyes17_send_cmd(struct sr_serial_dev_inst *serial, uint8_t hdr,
+int eyes17_write_cmd(struct sr_serial_dev_inst *serial, uint8_t hdr,
 		uint8_t sub, const uint8_t *args, size_t arglen)
 {
 	uint8_t buf[64];
@@ -41,10 +41,22 @@ int eyes17_send_cmd(struct sr_serial_dev_inst *serial, uint8_t hdr,
 		return SR_ERR_ARG;
 	buf[0] = hdr;
 	buf[1] = sub;
-	memcpy(buf + 2, args, arglen);
+	if (arglen)
+		memcpy(buf + 2, args, arglen);
 	if (serial_write_blocking(serial, buf, arglen + 2,
 			EYES17_WRITE_TIMEOUT_MS) != (int)(arglen + 2))
 		return SR_ERR_IO;
+	return SR_OK;
+}
+
+int eyes17_send_cmd(struct sr_serial_dev_inst *serial, uint8_t hdr,
+		uint8_t sub, const uint8_t *args, size_t arglen)
+{
+	int ret;
+
+	ret = eyes17_write_cmd(serial, hdr, sub, args, arglen);
+	if (ret != SR_OK)
+		return ret;
 	return eyes17_read_ack(serial);
 }
 
@@ -53,19 +65,16 @@ int eyes17_get_version(struct sr_serial_dev_inst *serial,
 {
 	char *buf = NULL;
 	int buflen = 64, ret;
-	uint8_t cmd[2];
 
 	/*
 	 * GET_VERSION answers with the version string directly -- there
-	 * is no ACK byte (hardware-observed: "SJ-2.4\\x0c\\n" immediately
-	 * follows the request). A shared send_cmd (write + ACK read)
-	 * would consume the 'S' as the ACK and fail the probe, so the
-	 * frame is written here without an ACK read.
+	 * is no ACK byte (golden packet_handler.get_version: write
+	 * COMMON + GET_VERSION, then readline; hardware-observed
+	 * "SJ-2.4\\x0c\\n"). A shared send_cmd (write + ACK read)
+	 * would consume the 'S' as the ACK and fail the probe.
 	 */
-	cmd[0] = EYES17_HDR_COMMON;
-	cmd[1] = EYES17_SUB_GET_VERSION;
-	if (serial_write_blocking(serial, cmd, sizeof(cmd),
-			EYES17_WRITE_TIMEOUT_MS) != (int)sizeof(cmd))
+	if (eyes17_write_cmd(serial, EYES17_HDR_COMMON,
+			EYES17_SUB_GET_VERSION, NULL, 0) != SR_OK)
 		return SR_ERR_IO;
 	buf = g_malloc0(buflen);
 	ret = serial_readline(serial, &buf, &buflen,

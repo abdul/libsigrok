@@ -53,10 +53,19 @@ int eyes17_get_version(struct sr_serial_dev_inst *serial,
 {
 	char *buf = NULL;
 	int buflen = 64, ret;
-	uint8_t dummy = 0;
+	uint8_t cmd[2];
 
-	if (eyes17_send_cmd(serial, EYES17_HDR_COMMON,
-			EYES17_SUB_GET_VERSION, &dummy, 0) != SR_OK)
+	/*
+	 * GET_VERSION answers with the version string directly -- there
+	 * is no ACK byte (hardware-observed: "SJ-2.4\\x0c\\n" immediately
+	 * follows the request). A shared send_cmd (write + ACK read)
+	 * would consume the 'S' as the ACK and fail the probe, so the
+	 * frame is written here without an ACK read.
+	 */
+	cmd[0] = EYES17_HDR_COMMON;
+	cmd[1] = EYES17_SUB_GET_VERSION;
+	if (serial_write_blocking(serial, cmd, sizeof(cmd),
+			EYES17_WRITE_TIMEOUT_MS) != (int)sizeof(cmd))
 		return SR_ERR_IO;
 	buf = g_malloc0(buflen);
 	ret = serial_readline(serial, &buf, &buflen,

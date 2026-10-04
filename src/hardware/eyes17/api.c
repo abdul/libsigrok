@@ -34,10 +34,17 @@ static const uint32_t devopts[] = {
 	SR_CONF_LIMIT_SAMPLES | SR_CONF_GET | SR_CONF_SET,
 	SR_CONF_RANGE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
 	SR_CONF_DIGITS | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_TRIGGER_SOURCE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_TRIGGER_SLOPE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_TRIGGER_LEVEL | SR_CONF_GET | SR_CONF_SET,
 };
 
+/* Only A1 has a golden trigger path; "none" is immediate capture. */
+static const char *eyes17_trigger_sources[] = { "none", "A1" };
+static const char *eyes17_trigger_slopes[] = { "rising" };
+
 /* ADC resolution option: 10-bit now, 12-bit arrives with M6. */
-static const char *eyes17_digits[] = { "10", "12" };
+ static const char *eyes17_digits[] = { "10", "12" };
 
 /*
  * All of scan/config_get/config_set/config_list/dev_open/dev_close/
@@ -83,6 +90,9 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 	devc->limit_samples = EYES17_DEFAULT_LIMIT_SAMPLES;
 	devc->gain = 0;
 	devc->resolution = EYES17_RESOLUTION_10BIT;
+	g_strlcpy(devc->trigger_source, "none", sizeof(devc->trigger_source));
+	g_strlcpy(devc->trigger_slope, "rising", sizeof(devc->trigger_slope));
+	devc->trigger_level = 0.0;
 	if (eyes17_get_version(serial, &devc->fw) != SR_OK) {
 		g_free(devc);
 		serial_close(serial);
@@ -141,6 +151,15 @@ static int config_get(uint32_t key, GVariant **data,
 			return SR_ERR_BUG;
 		*data = g_variant_new_string(text);
 		break;
+	case SR_CONF_TRIGGER_SOURCE:
+		*data = g_variant_new_string(devc->trigger_source);
+		break;
+	case SR_CONF_TRIGGER_SLOPE:
+		*data = g_variant_new_string(devc->trigger_slope);
+		break;
+	case SR_CONF_TRIGGER_LEVEL:
+		*data = g_variant_new_double(devc->trigger_level);
+		break;
 	default:
 		return SR_ERR_NA;
 	}
@@ -194,6 +213,19 @@ static int config_set(uint32_t key, GVariant *data,
 			return SR_ERR_ARG;
 		}
 		break;
+	case SR_CONF_TRIGGER_SOURCE:
+		if (std_str_idx(data, ARRAY_AND_SIZE(eyes17_trigger_sources)) < 0)
+			return SR_ERR_ARG;
+		g_strlcpy(devc->trigger_source, g_variant_get_string(data, NULL), sizeof(devc->trigger_source));
+		break;
+	case SR_CONF_TRIGGER_SLOPE:
+		if (std_str_idx(data, ARRAY_AND_SIZE(eyes17_trigger_slopes)) < 0)
+			return SR_ERR_ARG;
+		g_strlcpy(devc->trigger_slope, g_variant_get_string(data, NULL), sizeof(devc->trigger_slope));
+		break;
+	case SR_CONF_TRIGGER_LEVEL:
+		devc->trigger_level = g_variant_get_double(data);
+		break;
 	default:
 		return SR_ERR_NA;
 	}
@@ -221,16 +253,22 @@ static int config_list(uint32_t key, GVariant **data,
 	case SR_CONF_DIGITS:
 		*data = std_gvar_array_str(ARRAY_AND_SIZE(eyes17_digits));
 		return SR_OK;
+	case SR_CONF_TRIGGER_SOURCE:
+		*data = std_gvar_array_str(ARRAY_AND_SIZE(eyes17_trigger_sources));
+		return SR_OK;
+	case SR_CONF_TRIGGER_SLOPE:
+		*data = std_gvar_array_str(ARRAY_AND_SIZE(eyes17_trigger_slopes));
+		return SR_OK;
 	default:
 		return SR_ERR_NA;
 	}
 }
 
 /*
- * Single-shot A1 acquisition: validate the requested combo, run the
- * Task-4 immediate capture, then emit HEADER, one ANALOG packet
- * (SR_MQ_VOLTAGE, volts) and END. No trigger or gain-switch command
- * on this path (M3/M6 own those); gain selects the calibration curve.
+ * Single-shot A1 acquisition: validate the requested combo (including
+ * the trigger level against the current gain), run the immediate or
+ * triggered capture, then emit HEADER, one ANALOG packet
+ * (SR_MQ_VOLTAGE, volts) and END. Gain selects the calibration curve.
  */
 static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
@@ -242,6 +280,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	struct sr_analog_meaning meaning;
 	struct sr_analog_spec spec;
 	uint16_t tb8, count;
+	uint16_t level;
 	float *volts;
 	int ret;
 
@@ -255,8 +294,15 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	if (ret != SR_OK)
 		return ret;
 
+	ret = eyes17_check_trigger(devc->trigger_source, devc->trigger_slope, devc->trigger_level, devc->gain, &level);
+	if (ret != SR_OK)
+		return ret;
+
 	volts = g_malloc(count * sizeof(*volts));
-	ret = eyes17_capture_one(serial, tb8, count, devc->gain, volts);
+	if (g_strcmp0(devc->trigger_source, "none") == 0)
+		ret = eyes17_capture_one(serial, tb8, count, devc->gain, volts);
+	else
+		ret = eyes17_capture_triggered(serial, tb8, count, devc->gain, level, volts);
 	if (ret != SR_OK) {
 		g_free(volts);
 		return ret;

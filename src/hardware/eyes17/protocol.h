@@ -85,6 +85,9 @@ struct dev_context {
 	uint64_t limit_samples;
 	int gain;
 	int resolution;
+	char trigger_source[8];
+	char trigger_slope[8];
+	double trigger_level;
 };
 
 SR_PRIV void eyes17_put_u16_le(uint8_t *p, uint16_t v);

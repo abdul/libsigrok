@@ -52,6 +52,8 @@
 #define EYES17_TIMEBASE_MIN_US 1.5
 #define EYES17_TB8_MIN 12
 #define EYES17_CHOSA_A1 3
+/* Trigger flag OR'd into the CHOSA byte (golden eyes.py:capture_traces:837). */
+#define EYES17_CHOSA_TRIGGERED 0x80
 #define EYES17_CAPTURE_FRAME_LEN 7
 #define EYES17_FETCH_FRAME_LEN 7
 /* Golden DATA_SPLITTING (eyes.py:116 via commands_proto.py:10): the
@@ -118,6 +120,8 @@ SR_PRIV gboolean eyes17_gain_is_valid(int gain);
 SR_PRIV float eyes17_adc_to_volts_ideal(uint16_t raw, int gain);
 SR_PRIV gboolean eyes17_calibration_is_ready(void);
 SR_PRIV gboolean eyes17_calibration_load(const uint8_t *flash, size_t len);
+SR_PRIV int eyes17_check_trigger(const char *source, const char *slope, double level_volts, int gain, uint16_t *level_out);
+SR_PRIV int eyes17_capture_triggered(struct sr_serial_dev_inst *serial, uint16_t tb8, uint16_t count, int gain, uint16_t level, float *volts_out);
 SR_PRIV int eyes17_capture_one(struct sr_serial_dev_inst *serial,
 		uint16_t tb8, uint16_t count, int gain, float *volts_out);
 

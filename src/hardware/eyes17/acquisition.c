@@ -258,3 +258,84 @@ int eyes17_capture_one(struct sr_serial_dev_inst *serial,
 	g_free(raw);
 	return ret;
 }
+
+int eyes17_check_trigger(const char *source, const char *slope,
+		double level_volts, int gain, uint16_t *level_out)
+{
+	if (!source || !slope || !level_out)
+		return SR_ERR_ARG;
+	if (g_strcmp0(source, "none") == 0) {
+		*level_out = 0;
+		return SR_OK;
+	}
+	if (g_strcmp0(source, "A1") != 0)
+		return SR_ERR_ARG;
+	if (g_strcmp0(slope, "rising") != 0)
+		return SR_ERR_ARG;
+	return eyes17_trigger_level_code(level_volts, gain, level_out);
+}
+
+/*
+ * Triggered single-channel capture: configure the trigger first
+ * (golden order), then run the immediate path with the triggered
+ * CHOSA byte. The 8 ms hardware trigger timeout is absorbed by the
+ * conversion deadline in eyes17_wait_conversion.
+ */
+int eyes17_capture_triggered(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, uint16_t level,
+		float *volts_out)
+{
+	uint8_t args[5];
+	uint8_t fetch[5];
+	uint8_t *raw;
+	uint16_t got, n;
+	size_t i;
+	int ret;
+
+	if (!serial || !volts_out || count == 0)
+		return SR_ERR_ARG;
+	if (!tb8)
+		tb8 = EYES17_TB8_MIN;
+	count = eyes17_clamp_count(count);
+	ret = eyes17_configure_trigger(serial, level);
+	if (ret != SR_OK)
+		return ret;
+	args[0] = EYES17_CHOSA_A1 | EYES17_CHOSA_TRIGGERED;
+	eyes17_put_u16_le(args + 1, count);
+	eyes17_put_u16_le(args + 3, tb8);
+	ret = eyes17_send_cmd(serial, EYES17_HDR_ADC,
+		EYES17_SUB_CAPTURE_ONE, args, sizeof(args));
+	if (ret != SR_OK)
+		return ret;
+	ret = eyes17_wait_conversion(serial, tb8, count);
+	if (ret != SR_OK)
+		return ret;
+	raw = g_malloc(EYES17_FETCH_CHUNK * 2);
+	got = 0;
+	while (got < count) {
+		n = count - got;
+		if (n > EYES17_FETCH_CHUNK)
+			n = EYES17_FETCH_CHUNK;
+		fetch[0] = 0;
+		eyes17_put_u16_le(fetch + 1, n);
+		eyes17_put_u16_le(fetch + 3, got);
+		ret = eyes17_write_cmd(serial, EYES17_HDR_ADC,
+			EYES17_SUB_GET_CAPTURE_CHANNEL, fetch, sizeof(fetch));
+		if (ret != SR_OK)
+			break;
+		if (serial_read_blocking(serial, raw, (size_t)n * 2,
+				EYES17_CAPTURE_TIMEOUT_MS) != (int)((size_t)n * 2)) {
+			ret = SR_ERR_TIMEOUT;
+			break;
+		}
+		ret = eyes17_read_ack(serial);
+		if (ret != SR_OK)
+			break;
+		for (i = 0; i < n; i++)
+			volts_out[got + i] = eyes17_adc_to_volts(
+				eyes17_get_u16_le(raw + 2 * i), gain);
+		got += n;
+	}
+	g_free(raw);
+	return ret;
+}

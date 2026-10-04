@@ -163,6 +163,45 @@ START_TEST(test_trigger_level)
 }
 END_TEST
 
+START_TEST(test_chosa_trigger_flag)
+{
+	uint8_t plain[EYES17_CAPTURE_FRAME_LEN];
+	uint8_t trig[EYES17_CAPTURE_FRAME_LEN];
+	size_t i;
+
+	ck_assert_uint_eq(eyes17_build_capture_one(plain, 80, 100),
+		sizeof(plain));
+	ck_assert_uint_eq(plain[2], EYES17_CHOSA_A1);
+	for (i = 0; i < sizeof(trig); i++)
+		trig[i] = plain[i];
+	trig[2] |= EYES17_CHOSA_TRIGGERED;
+	ck_assert_uint_eq(trig[2], (uint8_t)(EYES17_CHOSA_A1 | 0x80));
+	ck_assert_int_eq(memcmp(trig + 3, plain + 3, 4), 0);
+}
+END_TEST
+
+START_TEST(test_trigger_check)
+{
+	uint16_t level = 0;
+
+	ck_assert_int_eq(eyes17_check_trigger("A1", "rising", 1.1, 0,
+		&level), SR_OK);
+	ck_assert_uint_eq(level, 477);
+	ck_assert_int_eq(eyes17_check_trigger("none", "rising", 0.0, 0,
+		&level), SR_OK);
+	ck_assert_int_ne(eyes17_check_trigger("A2", "rising", 1.1, 0,
+		&level), SR_OK);
+	ck_assert_int_ne(eyes17_check_trigger("A1", "falling", 1.1, 0,
+		&level), SR_OK);
+	ck_assert_int_ne(eyes17_check_trigger("A1", "rising", 20.0, 0,
+		&level), SR_OK);
+	ck_assert_int_ne(eyes17_check_trigger(NULL, "rising", 0.0, 0,
+		&level), SR_OK);
+	ck_assert_int_ne(eyes17_check_trigger("A1", "rising", 1.1, 0,
+		NULL), SR_OK);
+}
+END_TEST
+
 /*
  * Link-only transport stubs. The eyes17 unit tests exercise pure functions
  * only; the serial helpers are hidden in the shared lib, so these
@@ -462,6 +501,8 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tc, test_version_reject);
 	tcase_add_test(tt, test_timebase_floor);
 	tcase_add_test(tt, test_timebase_1_5us_rate);
+	tcase_add_test(tt, test_chosa_trigger_flag);
+	tcase_add_test(tt, test_trigger_check);
 	tcase_add_test(tt, test_timebase_10us);
 	tcase_add_test(tt, test_count_cap);
 	tcase_add_test(tt, test_capture_one_frame);

@@ -129,6 +129,41 @@ START_TEST(test_fetch_channel_frame)
 END_TEST
 
 /*
+ * M3 hardware triggering. Golden eyes.py:configure_trigger:1182:
+ * [ADC, CONFIGURE_TRIGGER, (prescaler<<4)|(1<<chan), level u16le].
+ * Level 477 = 1.1 V at gain 0 via the inverted A1 range.
+ */
+START_TEST(test_trigger_frame)
+{
+	uint8_t buf[EYES17_TRIGGER_FRAME_LEN];
+	uint8_t expect[] = { 2, 5, 0x01, 0xDD, 0x01 };
+	ck_assert_uint_eq(eyes17_build_trigger(buf, 477),
+		sizeof(expect));
+	ck_assert_int_eq(memcmp(buf, expect, sizeof(expect)), 0);
+}
+END_TEST
+
+START_TEST(test_trigger_level)
+{
+	uint16_t code = 0;
+
+	ck_assert_int_eq(eyes17_trigger_level_code(0.0, 0, &code), SR_OK);
+	ck_assert_uint_eq(code, 512);
+	ck_assert_int_eq(eyes17_trigger_level_code(1.1, 0, &code), SR_OK);
+	ck_assert_uint_eq(code, 477);
+	ck_assert_int_eq(eyes17_trigger_level_code(16.5, 0, &code), SR_OK);
+	ck_assert_uint_eq(code, 0);
+	ck_assert_int_eq(eyes17_trigger_level_code(-16.5, 0, &code), SR_OK);
+	ck_assert_uint_eq(code, 1023);
+	ck_assert_int_eq(eyes17_trigger_level_code(8.25, 1, &code), SR_OK);
+	ck_assert_uint_eq(code, 0);
+	ck_assert_int_ne(eyes17_trigger_level_code(20.0, 0, &code), SR_OK);
+	ck_assert_int_ne(eyes17_trigger_level_code(0.0, 8, &code), SR_OK);
+	ck_assert_int_ne(eyes17_trigger_level_code(0.0, 0, NULL), SR_OK);
+}
+END_TEST
+
+/*
  * Link-only transport stubs. The eyes17 unit tests exercise pure functions
  * only; the serial helpers are hidden in the shared lib, so these
  * never-called definitions solely satisfy the tests/main link. They
@@ -431,6 +466,8 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tt, test_count_cap);
 	tcase_add_test(tt, test_capture_one_frame);
 	tcase_add_test(tt, test_fetch_channel_frame);
+	tcase_add_test(tt, test_trigger_frame);
+	tcase_add_test(tt, test_trigger_level);
 	tcase_add_test(tk, test_gain_table);
 	tcase_add_test(tk, test_ideal_midscale);
 	tcase_add_test(tk, test_ideal_endpoints);

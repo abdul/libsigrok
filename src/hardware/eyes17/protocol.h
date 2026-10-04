@@ -30,9 +30,13 @@
 #define EYES17_BAUD 500000
 #define EYES17_MAX_SAMPLES 10000
 
-/* Protocol headers (from golden commands_proto.py mapping). */
 #define EYES17_HDR_ADC 2
 #define EYES17_SUB_CAPTURE_ONE 1
+/* Hardware triggering (acquisition.c, M3). Golden eyes.py:configure_trigger:1182: [ADC, CONFIGURE_TRIGGER, (prescaler<<4)|(1<<chan), level u16le] + ACK. Single-channel A1 uses chan 0, prescaler 0 (8 ms hardware timeout). */
+#define EYES17_SUB_CONFIGURE_TRIGGER 5
+#define EYES17_TRIGGER_FRAME_LEN 5
+#define EYES17_TRIGGER_CHAN_A1 0
+#define EYES17_TRIGGER_LEVEL_MAX 1023
 #define EYES17_SUB_GET_CAPTURE_STATUS 6
 #define EYES17_SUB_GET_CAPTURE_CHANNEL 7
 #define EYES17_HDR_COMMON 11
@@ -101,6 +105,9 @@ SR_PRIV size_t eyes17_build_capture_one(uint8_t *buf, uint16_t tb8,
 SR_PRIV size_t eyes17_build_fetch_channel(uint8_t *buf, uint16_t n,
 		uint16_t offset);
 SR_PRIV float eyes17_adc_to_volts(uint16_t raw, int gain);
+SR_PRIV size_t eyes17_build_trigger(uint8_t *buf, uint16_t level);
+SR_PRIV int eyes17_trigger_level_code(double volts, int gain, uint16_t *code_out);
+SR_PRIV int eyes17_configure_trigger(struct sr_serial_dev_inst *serial, uint16_t level);
 
 /* Gain table, ideal curve, flash discipline (calibration.c). Gain
  * index 8 is external-attenuator-only and rejected from the normal path. */

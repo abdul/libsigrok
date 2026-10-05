@@ -111,6 +111,8 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 	sdi->priv = devc;
 	devc->serial = serial;
 	sr_channel_new(sdi, 0, SR_CHANNEL_ANALOG, TRUE, "A1");
+	/* A2 joins disabled: default acquisitions stay single-channel (M2/M3 behavior byte-identical); enabling A2 selects dual. */
+	sr_channel_new(sdi, 1, SR_CHANNEL_ANALOG, FALSE, "A2");
 
 	return std_scan_complete(driver, g_slist_append(NULL, sdi));
 }
@@ -272,59 +274,135 @@ static int config_list(uint32_t key, GVariant **data,
  */
 static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
-	struct dev_context *devc;
-	struct sr_serial_dev_inst *serial;
-	struct sr_datafeed_packet packet;
-	struct sr_datafeed_analog analog;
-	struct sr_analog_encoding encoding;
-	struct sr_analog_meaning meaning;
-	struct sr_analog_spec spec;
-	uint16_t tb8, count;
-	uint16_t level;
-	float *volts;
-	int ret;
+    struct dev_context *devc;
+    struct sr_serial_dev_inst *serial;
+    struct sr_datafeed_packet packet;
+    struct sr_datafeed_analog analog;
+    struct sr_analog_encoding encoding;
+    struct sr_analog_meaning meaning;
+    struct sr_analog_spec spec;
+    GSList *l;
+    struct sr_channel *ch;
+    struct sr_channel *ch_a1 = NULL, *ch_a2 = NULL;
+    GSList *ach1 = NULL, *ach2 = NULL;
+    int n_enabled = 0, a2_enabled = 0;
+    uint16_t tb8, count;
+    uint16_t level;
+    float *volts, *volts2;
+    int ret;
 
-	if (!sdi || !sdi->priv || !sdi->conn)
-		return SR_ERR_ARG;
-	devc = sdi->priv;
-	serial = sdi->conn;
+    if (!sdi || !sdi->priv || !sdi->conn)
+        return SR_ERR_ARG;
+    devc = sdi->priv;
+    serial = sdi->conn;
 
-	ret = eyes17_check_acquisition(devc->samplerate, devc->limit_samples,
-		devc->gain, devc->resolution, 1, &tb8, &count);
-	if (ret != SR_OK)
-		return ret;
+    for (l = sdi->channels; l; l = l->next) {
+        ch = l->data;
+        if (ch->type != SR_CHANNEL_ANALOG || !ch->enabled)
+            continue;
+        n_enabled++;
+        if (ch->index == 0)
+            ch_a1 = ch;
+        else if (ch->index == 1)
+            a2_enabled = 1, ch_a2 = ch;
+    }
+    if (n_enabled == 0)
+        return SR_ERR_ARG;
+    if (a2_enabled && n_enabled != 2)
+        return SR_ERR_ARG; /* A2-only has no golden wire path. */
 
-	ret = eyes17_check_trigger(devc->trigger_source, devc->trigger_slope, devc->trigger_level, devc->gain, &level);
-	if (ret != SR_OK)
-		return ret;
+    ret = eyes17_check_acquisition(devc->samplerate, devc->limit_samples,
+        devc->gain, devc->resolution, n_enabled, &tb8, &count);
+    if (ret != SR_OK)
+        return ret;
 
-	volts = g_malloc(count * sizeof(*volts));
-	if (g_strcmp0(devc->trigger_source, "none") == 0)
-		ret = eyes17_capture_one(serial, tb8, count, devc->gain, volts);
-	else
-		ret = eyes17_capture_triggered(serial, tb8, count, devc->gain, level, volts);
-	if (ret != SR_OK) {
-		g_free(volts);
-		return ret;
-	}
+    ret = eyes17_check_trigger(devc->trigger_source, devc->trigger_slope,
+        devc->trigger_level, devc->gain, &level);
+    if (ret != SR_OK)
+        return ret;
 
-	std_session_send_df_header(sdi);
+    if (n_enabled == 1) {
+        /* Unchanged M2/M3 single path. */
+        volts = g_malloc(count * sizeof(*volts));
+        if (g_strcmp0(devc->trigger_source, "none") == 0)
+            ret = eyes17_capture_one(serial, tb8, count,
+                devc->gain, volts);
+        else
+            ret = eyes17_capture_triggered(serial, tb8, count,
+                devc->gain, level, volts);
+        if (ret != SR_OK) {
+            g_free(volts);
+            return ret;
+        }
 
-	sr_analog_init(&analog, &encoding, &meaning, &spec,
-		EYES17_ANALOG_DIGITS);
-	analog.meaning->mq = SR_MQ_VOLTAGE;
-	analog.meaning->unit = SR_UNIT_VOLT;
-	analog.meaning->channels = sdi->channels;
-	analog.num_samples = count;
-	analog.data = volts;
-	packet.type = SR_DF_ANALOG;
-	packet.payload = &analog;
-	sr_session_send(sdi, &packet);
-	g_free(volts);
+        std_session_send_df_header(sdi);
 
-	std_session_send_df_end(sdi);
+        sr_analog_init(&analog, &encoding, &meaning, &spec,
+            EYES17_ANALOG_DIGITS);
+        analog.meaning->mq = SR_MQ_VOLTAGE;
+        analog.meaning->unit = SR_UNIT_VOLT;
+        analog.meaning->channels = sdi->channels;
+        analog.num_samples = count;
+        analog.data = volts;
+        packet.type = SR_DF_ANALOG;
+        packet.payload = &analog;
+        sr_session_send(sdi, &packet);
+        g_free(volts);
 
-	return SR_OK;
+        std_session_send_df_end(sdi);
+
+        return SR_OK;
+    }
+
+    /* Dual path: fixed A1+A2 pair, per-channel volts + packets. */
+    volts = g_malloc(count * sizeof(*volts));
+    volts2 = g_malloc(count * sizeof(*volts2));
+    if (g_strcmp0(devc->trigger_source, "none") == 0)
+        ret = eyes17_capture_two(serial, tb8, count,
+            devc->gain, volts, volts2);
+    else
+        ret = eyes17_capture_two_triggered(serial, tb8, count,
+            devc->gain, level, volts, volts2);
+    if (ret != SR_OK) {
+        g_free(volts);
+        g_free(volts2);
+        return ret;
+    }
+
+    std_session_send_df_header(sdi);
+
+    ach1 = g_slist_append(ach1, ch_a1);
+    sr_analog_init(&analog, &encoding, &meaning, &spec,
+        EYES17_ANALOG_DIGITS);
+    analog.meaning->mq = SR_MQ_VOLTAGE;
+    analog.meaning->unit = SR_UNIT_VOLT;
+    analog.meaning->channels = ach1;
+    analog.num_samples = count;
+    analog.data = volts;
+    packet.type = SR_DF_ANALOG;
+    packet.payload = &analog;
+    sr_session_send(sdi, &packet);
+
+    ach2 = g_slist_append(ach2, ch_a2);
+    sr_analog_init(&analog, &encoding, &meaning, &spec,
+        EYES17_ANALOG_DIGITS);
+    analog.meaning->mq = SR_MQ_VOLTAGE;
+    analog.meaning->unit = SR_UNIT_VOLT;
+    analog.meaning->channels = ach2;
+    analog.num_samples = count;
+    analog.data = volts2;
+    packet.type = SR_DF_ANALOG;
+    packet.payload = &analog;
+    sr_session_send(sdi, &packet);
+
+    g_slist_free(ach1);
+    g_slist_free(ach2);
+    g_free(volts);
+    g_free(volts2);
+
+    std_session_send_df_end(sdi);
+
+    return SR_OK;
 }
 
 static struct sr_dev_driver eyes17_driver_info = {

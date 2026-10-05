@@ -252,7 +252,7 @@ int eyes17_capture_one(struct sr_serial_dev_inst *serial,
 			break;
 		for (i = 0; i < n; i++)
 			volts_out[got + i] = eyes17_adc_to_volts(
-				eyes17_get_u16_le(raw + 2 * i), gain);
+				eyes17_get_u16_le(raw + 2 * i), gain, EYES17_CH_A1);
 		got += n;
 	}
 	g_free(raw);
@@ -333,7 +333,7 @@ int eyes17_capture_triggered(struct sr_serial_dev_inst *serial,
 			break;
 		for (i = 0; i < n; i++)
 			volts_out[got + i] = eyes17_adc_to_volts(
-				eyes17_get_u16_le(raw + 2 * i), gain);
+				eyes17_get_u16_le(raw + 2 * i), gain, EYES17_CH_A1);
 		got += n;
 	}
 	g_free(raw);

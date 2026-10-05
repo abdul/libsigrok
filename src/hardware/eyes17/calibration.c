@@ -46,6 +46,8 @@ static const double eyes17_gain_factors[] = { 1, 2, 4, 5, 8, 10, 16, 32, 0.0 };
 #define EYES17_FLASH_MAGIC_LEN 7
 #define EYES17_FLASH_A1_MARKER ">|A1|<"
 #define EYES17_FLASH_A1_MARKER_LEN 6
+#define EYES17_FLASH_A2_MARKER ">|A2|<"
+#define EYES17_FLASH_A2_MARKER_LEN 6
 #define EYES17_FLASH_STOP "STOP"
 #define EYES17_FLASH_STOP_LEN 4
 #define EYES17_FLASH_POLY_LEN 12
@@ -54,8 +56,8 @@ static const double eyes17_gain_factors[] = { 1, 2, 4, 5, 8, 10, 16, 32, 0.0 };
  * index (golden struct.unpack('3f') triples, eyes.py:__runInitSequence__:265).
  * The 10-bit path scales raw into the 12-bit domain first, matching the
  * golden __cal10__ (achan.py:158). */
-static double eyes17_cal_polys[8][3];
-static gboolean eyes17_cal_use_poly[8];
+static double eyes17_cal_polys[EYES17_NUM_CHANNELS][8][3];
+static gboolean eyes17_cal_use_poly[EYES17_NUM_CHANNELS][8];
 static gboolean eyes17_calibration_ready = FALSE;
 
 double eyes17_gain_factor(int gain)
@@ -115,10 +117,11 @@ static const uint8_t *eyes17_find_marker(const uint8_t *p, size_t len,
 
 static void eyes17_calibration_clear(void)
 {
-	int g;
+	int ch, g;
 
-	for (g = 0; g <= EYES17_GAIN_NORMAL_MAX; g++)
-		eyes17_cal_use_poly[g] = FALSE;
+	for (ch = 0; ch < EYES17_NUM_CHANNELS; ch++)
+		for (g = 0; g <= EYES17_GAIN_NORMAL_MAX; g++)
+			eyes17_cal_use_poly[ch][g] = FALSE;
 	eyes17_calibration_ready = FALSE;
 }
 
@@ -129,33 +132,15 @@ static void eyes17_calibration_clear(void)
  * Per-gain entries deviating >30% from ideal at full scale fall back
  * to the ideal curve (golden loadPolynomials rule).
  */
-gboolean eyes17_calibration_load(const uint8_t *flash, size_t len)
+static void eyes17_load_channel_polys(const uint8_t *p, size_t avail, int ch)
 {
-	const uint8_t *mark, *stop, *p;
-	size_t avail, n, g;
+	size_t n, g;
 	float triple[3];
 	double c2, c1, c0, fit, ideal, err;
 
-	eyes17_calibration_clear();
-	if (!flash || len < EYES17_FLASH_MAGIC_LEN)
-		return FALSE;
-	if (memcmp(flash, EYES17_FLASH_MAGIC, EYES17_FLASH_MAGIC_LEN) != 0)
-		return FALSE;
-	mark = eyes17_find_marker(flash, len,
-		EYES17_FLASH_A1_MARKER, EYES17_FLASH_A1_MARKER_LEN);
-	if (!mark)
-		return FALSE;
-	p = mark + EYES17_FLASH_A1_MARKER_LEN;
-	avail = (size_t)(flash + len - p);
-	stop = eyes17_find_marker(p, avail,
-		EYES17_FLASH_STOP, EYES17_FLASH_STOP_LEN);
-	if (stop)
-		avail = (size_t)(stop - p);
 	n = avail / EYES17_FLASH_POLY_LEN;
 	if (n > 8)
 		n = 8;
-	if (n == 0)
-		return FALSE;
 	for (g = 0; g < n; g++) {
 		memcpy(triple, p + g * EYES17_FLASH_POLY_LEN,
 			EYES17_FLASH_POLY_LEN);
@@ -170,11 +155,51 @@ gboolean eyes17_calibration_load(const uint8_t *flash, size_t len)
 		err = 100.0 * fabs((fit - ideal) / ideal);
 		if (err > EYES17_CAL_MAX_DEVIATION_PCT)
 			continue;
-		eyes17_cal_polys[g][0] = c2;
-		eyes17_cal_polys[g][1] = c1;
-		eyes17_cal_polys[g][2] = c0;
-		eyes17_cal_use_poly[g] = TRUE;
+		eyes17_cal_polys[ch][g][0] = c2;
+		eyes17_cal_polys[ch][g][1] = c1;
+		eyes17_cal_polys[ch][g][2] = c0;
+		eyes17_cal_use_poly[ch][g] = TRUE;
 	}
+}
+
+gboolean eyes17_calibration_load(const uint8_t *flash, size_t len)
+{
+	const uint8_t *mark, *stop, *p;
+	size_t avail;
+	gboolean have_a1 = FALSE;
+
+	eyes17_calibration_clear();
+	if (!flash || len < EYES17_FLASH_MAGIC_LEN)
+		return FALSE;
+	if (memcmp(flash, EYES17_FLASH_MAGIC, EYES17_FLASH_MAGIC_LEN) != 0)
+		return FALSE;
+	mark = eyes17_find_marker(flash, len,
+		EYES17_FLASH_A1_MARKER, EYES17_FLASH_A1_MARKER_LEN);
+	if (mark) {
+		p = mark + EYES17_FLASH_A1_MARKER_LEN;
+		avail = (size_t)(flash + len - p);
+		stop = eyes17_find_marker(p, avail,
+			EYES17_FLASH_STOP, EYES17_FLASH_STOP_LEN);
+		if (stop)
+			avail = (size_t)(stop - p);
+		if (avail / EYES17_FLASH_POLY_LEN == 0)
+			return FALSE;
+		eyes17_load_channel_polys(p, avail, EYES17_CH_A1);
+		have_a1 = TRUE;
+	}
+	mark = eyes17_find_marker(flash, len,
+		EYES17_FLASH_A2_MARKER, EYES17_FLASH_A2_MARKER_LEN);
+	if (mark) {
+		p = mark + EYES17_FLASH_A2_MARKER_LEN;
+		avail = (size_t)(flash + len - p);
+		stop = eyes17_find_marker(p, avail,
+			EYES17_FLASH_STOP, EYES17_FLASH_STOP_LEN);
+		if (stop)
+			avail = (size_t)(stop - p);
+		eyes17_load_channel_polys(p, avail, EYES17_CH_A2);
+	}
+	if (!have_a1)
+		return FALSE;
 	eyes17_calibration_ready = TRUE;
 	return TRUE;
 }
@@ -217,17 +242,17 @@ int eyes17_range_to_gain(const char *s, int *gain_out)
 	return SR_ERR_ARG;
 }
 
-float eyes17_adc_to_volts(uint16_t raw, int gain)
+float eyes17_adc_to_volts(uint16_t raw, int gain, int ch)
 {
 	double x;
 
-	if (!eyes17_gain_is_valid(gain))
+	if (!eyes17_gain_is_valid(gain) || ch < 0 || ch >= EYES17_NUM_CHANNELS)
 		return NAN;
-	if (eyes17_calibration_ready && eyes17_cal_use_poly[gain]) {
+	if (eyes17_calibration_ready && eyes17_cal_use_poly[ch][gain]) {
 		x = raw * EYES17_ADC12_FULL / EYES17_ADC10_FULL;
-		return (float)(eyes17_cal_polys[gain][0] * x * x +
-			eyes17_cal_polys[gain][1] * x +
-			eyes17_cal_polys[gain][2]);
+		return (float)(eyes17_cal_polys[ch][gain][0] * x * x +
+			eyes17_cal_polys[ch][gain][1] * x +
+			eyes17_cal_polys[ch][gain][2]);
 	}
 	return eyes17_adc_to_volts_ideal(raw, gain);
 }

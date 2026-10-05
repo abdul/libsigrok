@@ -277,7 +277,7 @@ START_TEST(test_ideal_midscale)
 	eyes17_calibration_load(NULL, 0);
 	ck_assert(fabsf(eyes17_adc_to_volts_ideal(511, 0)) <= lsb);
 	ck_assert(fabsf(eyes17_adc_to_volts_ideal(512, 0)) <= lsb);
-	ck_assert(fabsf(eyes17_adc_to_volts(511, 0)) <= lsb);
+	ck_assert(fabsf(eyes17_adc_to_volts(511, 0, EYES17_CH_A1)) <= lsb);
 }
 END_TEST
 
@@ -300,9 +300,9 @@ START_TEST(test_gain8_rejected)
 {
 	eyes17_calibration_load(NULL, 0);
 	ck_assert(isnan(eyes17_adc_to_volts_ideal(512, 8)));
-	ck_assert(isnan(eyes17_adc_to_volts(512, 8)));
-	ck_assert(isnan(eyes17_adc_to_volts(512, -1)));
-	ck_assert(isnan(eyes17_adc_to_volts(512, 9)));
+	ck_assert(isnan(eyes17_adc_to_volts(512, 8, EYES17_CH_A1)));
+	ck_assert(isnan(eyes17_adc_to_volts(512, -1, EYES17_CH_A1)));
+	ck_assert(isnan(eyes17_adc_to_volts(512, 9, EYES17_CH_A1)));
 }
 END_TEST
 
@@ -315,7 +315,7 @@ START_TEST(test_flash_unreadable_not_ready)
 	ck_assert(!eyes17_calibration_load(junk, sizeof(junk)));
 	ck_assert(!eyes17_calibration_is_ready());
 	/* Falls back to ideal; never claims calibrated output. */
-	ck_assert(fabsf(eyes17_adc_to_volts(512, 0)) <=
+	ck_assert(fabsf(eyes17_adc_to_volts(512, 0, EYES17_CH_A1)) <=
 		(float)(33.0 / 1023.0));
 }
 END_TEST
@@ -366,7 +366,7 @@ START_TEST(test_deviation_rejected)
 	ck_assert(eyes17_calibration_load(blob,
 		build_flash_blob(blob, polys)));
 	ck_assert(eyes17_calibration_is_ready());
-	v = eyes17_adc_to_volts(0, 0);
+	v = eyes17_adc_to_volts(0, 0, EYES17_CH_A1);
 	ck_assert(fabsf(v - 16.5f) / 16.5f < 0.01f);
 }
 END_TEST
@@ -383,8 +383,60 @@ START_TEST(test_valid_poly_used)
 	ck_assert(eyes17_calibration_load(blob,
 		build_flash_blob(blob, polys)));
 	ck_assert(eyes17_calibration_is_ready());
-	v = eyes17_adc_to_volts(0, 0);
+	v = eyes17_adc_to_volts(0, 0, EYES17_CH_A1);
 	ck_assert(fabsf(v - 16.6f) < 0.02f);
+}
+END_TEST
+
+/*
+ * A1 ideal triple + A2 20%-off triple in one blob: load succeeds,
+ * A1 converts ideal, A2 converts its installed poly (proves
+ * per-channel storage, no cross-talk). Triple bytes are exact
+ * struct.pack('<f') values (c2=0.0f; A1 c1=-33/4095; A2 c1=1.1x;
+ * c0=16.5f).
+ */
+START_TEST(test_a2_section_parse)
+{
+	static const uint8_t blob[] =
+		"ExpEYES>|A1|<"
+		"\x00\x00\x00\x00\x41\x08\x04\xbc\x00\x00\x84\x41"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		">|A2|<"
+		"\x00\x00\x00\x00\x47\x3c\x11\xbc\x00\x00\x84\x41"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+	float v_a1, v_a2;
+
+	ck_assert(eyes17_calibration_load(blob, sizeof(blob) - 1));
+	v_a1 = eyes17_adc_to_volts(1023, 0, EYES17_CH_A1);
+	ck_assert(fabsf(v_a1 - (-16.5f)) < 0.01f);
+	/* A2 poly at x=4095: 1.1*(-33)+16.5 = -19.8. */
+	v_a2 = eyes17_adc_to_volts(1023, 0, EYES17_CH_A2);
+	ck_assert(fabsf(v_a2 - (-19.8f)) < 0.05f);
+}
+END_TEST
+
+/*
+ * A2 ideal endpoints equal A1's (same span/gains); bad channel
+ * indexes are NAN, never a silent A1 alias.
+ */
+START_TEST(test_a2_ideal_endpoints)
+{
+	ck_assert(fabsf(eyes17_adc_to_volts(0, 0, EYES17_CH_A2) - 16.5f) < 0.001f);
+	ck_assert(fabsf(eyes17_adc_to_volts(1023, 0, EYES17_CH_A2) + 16.5f) < 0.001f);
+	ck_assert(isnan(eyes17_adc_to_volts(512, 0, 2)));
+	ck_assert(isnan(eyes17_adc_to_volts(512, 0, -1)));
 }
 END_TEST
 
@@ -516,6 +568,8 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tk, test_flash_unreadable_not_ready);
 	tcase_add_test(tk, test_deviation_rejected);
 	tcase_add_test(tk, test_valid_poly_used);
+	tcase_add_test(tk, test_a2_section_parse);
+	tcase_add_test(tk, test_a2_ideal_endpoints);
 	tcase_add_test(tg, test_range_mapping);
 	tcase_add_test(tg, test_range_reject);
 	tcase_add_test(tg, test_resolution);

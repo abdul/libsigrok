@@ -52,6 +52,12 @@
 #define EYES17_TIMEBASE_MIN_US 1.5
 #define EYES17_TB8_MIN 12
 #define EYES17_CHOSA_A1 3
+/* Capture channels: 0 = A1, 1 = A2. A2 shares A1's gains, span,
+ * 30% rule and ideal form (golden achan.py:4,19,103-113); only the
+ * flash polys differ per channel. */
+#define EYES17_NUM_CHANNELS 2
+#define EYES17_CH_A1 0
+#define EYES17_CH_A2 1
 /* Trigger flag OR'd into the CHOSA byte (golden eyes.py:capture_traces:837). */
 #define EYES17_CHOSA_TRIGGERED 0x80
 #define EYES17_CAPTURE_FRAME_LEN 7
@@ -109,7 +115,7 @@ SR_PRIV size_t eyes17_build_capture_one(uint8_t *buf, uint16_t tb8,
 		uint16_t count);
 SR_PRIV size_t eyes17_build_fetch_channel(uint8_t *buf, uint16_t n,
 		uint16_t offset);
-SR_PRIV float eyes17_adc_to_volts(uint16_t raw, int gain);
+SR_PRIV float eyes17_adc_to_volts(uint16_t raw, int gain, int ch);
 SR_PRIV size_t eyes17_build_trigger(uint8_t *buf, uint16_t level);
 SR_PRIV int eyes17_trigger_level_code(double volts, int gain, uint16_t *code_out);
 SR_PRIV int eyes17_configure_trigger(struct sr_serial_dev_inst *serial, uint16_t level);

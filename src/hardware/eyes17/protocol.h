@@ -32,6 +32,7 @@
 
 #define EYES17_HDR_ADC 2
 #define EYES17_SUB_CAPTURE_ONE 1
+#define EYES17_SUB_CAPTURE_TWO 2
 /* Hardware triggering (acquisition.c, M3). Golden eyes.py:configure_trigger:1182: [ADC, CONFIGURE_TRIGGER, (prescaler<<4)|(1<<chan), level u16le] + ACK. Single-channel A1 uses chan 0, prescaler 0 (8 ms hardware timeout). */
 #define EYES17_SUB_CONFIGURE_TRIGGER 5
 #define EYES17_TRIGGER_FRAME_LEN 5
@@ -65,6 +66,14 @@
 /* Golden DATA_SPLITTING (eyes.py:116 via commands_proto.py:10): the
  * firmware serves at most this many samples per GET_CAPTURE_CHANNEL. */
 #define EYES17_FETCH_CHUNK 200
+/* Dual-channel capture (M4 Task 2). Golden eyes.py:capture_traces CAPTURE_TWO
+ * frame [ADC=2,SUB=2,CHOSA=3]+count u16le+tb8 u16le+ACK; fetch
+ * [ADC,7,ch-1,n,offset]. Dual floor 1.75 us (tb8 >= 14), cap 5000/ch. */
+#define EYES17_TIMEBASE_MIN_DUAL_US 1.75
+#define EYES17_TB8_MIN_DUAL 14
+#define EYES17_MAX_SAMPLES_DUAL 5000
+#define EYES17_FETCH_CH_A1 0
+#define EYES17_FETCH_CH_A2 1
 #define EYES17_CAPTURE_TIMEOUT_MS 2000
 
 struct eyes17_version {
@@ -113,8 +122,10 @@ SR_PRIV void eyes17_tb8_to_rate(uint16_t tb8, uint64_t *num, uint64_t *den);
 SR_PRIV uint16_t eyes17_clamp_count(size_t count);
 SR_PRIV size_t eyes17_build_capture_one(uint8_t *buf, uint16_t tb8,
 		uint16_t count);
-SR_PRIV size_t eyes17_build_fetch_channel(uint8_t *buf, uint16_t n,
-		uint16_t offset);
+SR_PRIV size_t eyes17_build_capture_two(uint8_t *buf, uint16_t tb8,
+		uint16_t count);
+SR_PRIV size_t eyes17_build_fetch_channel(uint8_t *buf, uint8_t ch,
+		uint16_t n, uint16_t offset);
 SR_PRIV float eyes17_adc_to_volts(uint16_t raw, int gain, int ch);
 SR_PRIV size_t eyes17_build_trigger(uint8_t *buf, uint16_t level);
 SR_PRIV int eyes17_trigger_level_code(double volts, int gain, uint16_t *code_out);
@@ -131,6 +142,12 @@ SR_PRIV gboolean eyes17_calibration_is_ready(void);
 SR_PRIV gboolean eyes17_calibration_load(const uint8_t *flash, size_t len);
 SR_PRIV int eyes17_check_trigger(const char *source, const char *slope, double level_volts, int gain, uint16_t *level_out);
 SR_PRIV int eyes17_capture_triggered(struct sr_serial_dev_inst *serial, uint16_t tb8, uint16_t count, int gain, uint16_t level, float *volts_out);
+SR_PRIV int eyes17_capture_two(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, float *a1_out,
+		float *a2_out);
+SR_PRIV int eyes17_capture_two_triggered(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, uint16_t level,
+		float *a1_out, float *a2_out);
 SR_PRIV int eyes17_capture_one(struct sr_serial_dev_inst *serial,
 		uint16_t tb8, uint16_t count, int gain, float *volts_out);
 
@@ -139,7 +156,7 @@ SR_PRIV const uint64_t *eyes17_samplerate_list(unsigned *n);
 SR_PRIV int eyes17_samplerate_to_tb8(uint64_t rate, uint16_t *tb8_out);
 SR_PRIV int eyes17_check_resolution(int bits);
 SR_PRIV int eyes17_check_acquisition(uint64_t samplerate, uint64_t limit,
-		int gain, int resolution, uint16_t *tb8_out,
+		int gain, int resolution, int channels, uint16_t *tb8_out,
 		uint16_t *count_out);
 SR_PRIV const char **eyes17_range_list(unsigned *n);
 SR_PRIV const char *eyes17_range_text(int gain);

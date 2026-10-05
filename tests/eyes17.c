@@ -122,8 +122,36 @@ START_TEST(test_fetch_channel_frame)
 {
 	uint8_t buf[EYES17_FETCH_FRAME_LEN];
 	uint8_t expect[] = { 2, 7, 0, 0xC8, 0x00, 0x00, 0x00 };
-	ck_assert_uint_eq(eyes17_build_fetch_channel(buf, 200, 0),
+	ck_assert_uint_eq(eyes17_build_fetch_channel(buf, EYES17_FETCH_CH_A1, 200, 0),
 		sizeof(expect));
+	ck_assert_int_eq(memcmp(buf, expect, sizeof(expect)), 0);
+}
+END_TEST
+
+/*
+ * Golden eyes.py:capture_traces CAPTURE_TWO frame
+ * [ADC=2,SUB=2,CHOSA=3]+count u16le+tb8 u16le (count=100, tb8=80).
+ */
+START_TEST(test_capture_two_frame)
+{
+	uint8_t buf[EYES17_CAPTURE_FRAME_LEN];
+	uint8_t expect[] = { 2, 2, 0x03, 0x64, 0x00, 0x50, 0x00 };
+	ck_assert_uint_eq(eyes17_build_capture_two(buf, 80, 100),
+		sizeof(expect));
+	ck_assert_int_eq(memcmp(buf, expect, sizeof(expect)), 0);
+}
+END_TEST
+
+/*
+ * Golden eyes.py fetch [ADC,7,ch-1,n,offset]: second channel
+ * (EYES17_FETCH_CH_A2, 200 samples, offset 0).
+ */
+START_TEST(test_fetch_channel_id)
+{
+	uint8_t buf[EYES17_FETCH_FRAME_LEN];
+	uint8_t expect[] = { 2, 7, 0x01, 0xC8, 0x00, 0x00, 0x00 };
+	ck_assert_uint_eq(eyes17_build_fetch_channel(buf, EYES17_FETCH_CH_A2,
+		200, 0), sizeof(expect));
 	ck_assert_int_eq(memcmp(buf, expect, sizeof(expect)), 0);
 }
 END_TEST
@@ -519,24 +547,48 @@ START_TEST(test_acquisition_check)
 	uint16_t tb8, count;
 
 	/* Valid combo: 100 kHz (tb8 80), 100 samples, gain 0, 10-bit. */
-	ck_assert_int_eq(eyes17_check_acquisition(100000, 100, 0, 10,
+	ck_assert_int_eq(eyes17_check_acquisition(100000, 100, 0, 10, 1,
 		&tb8, &count), SR_OK);
 	ck_assert_uint_eq(tb8, 80);
 	ck_assert_uint_eq(count, 100);
 	/* 12-bit rejected, never silently downgraded. */
-	ck_assert_int_eq(eyes17_check_acquisition(100000, 100, 0, 12,
+	ck_assert_int_eq(eyes17_check_acquisition(100000, 100, 0, 12, 1,
 		&tb8, &count), SR_ERR);
 	/* Bad gain, off-ladder rate, and empty capture rejected. */
-	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 8, 10,
+	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 8, 10, 1,
 		&tb8, &count), SR_OK);
-	ck_assert_int_ne(eyes17_check_acquisition(12345, 100, 0, 10,
+	ck_assert_int_ne(eyes17_check_acquisition(12345, 100, 0, 10, 1,
 		&tb8, &count), SR_OK);
-	ck_assert_int_ne(eyes17_check_acquisition(100000, 0, 0, 10,
+	ck_assert_int_ne(eyes17_check_acquisition(100000, 0, 0, 10, 1,
 		&tb8, &count), SR_OK);
 	/* Oversize clamps to EYES17_MAX_SAMPLES (Task-4 convention). */
-	ck_assert_int_eq(eyes17_check_acquisition(100000, 20000, 0, 10,
+	ck_assert_int_eq(eyes17_check_acquisition(100000, 20000, 0, 10, 1,
 		&tb8, &count), SR_OK);
 	ck_assert_uint_eq(count, 10000);
+}
+END_TEST
+
+START_TEST(test_check_dual_acquisition)
+{
+	uint16_t tb8, count;
+
+	/* Valid dual combo: 500 kHz (tb8 16), 2000 samples/ch. */
+	ck_assert_int_eq(eyes17_check_acquisition(500000, 2000, 0, 10, 2,
+		&tb8, &count), SR_OK);
+	ck_assert_uint_eq(tb8, 16);
+	ck_assert_uint_eq(count, 2000);
+	/* Fastest ladder rate (tb8 12) is below the dual floor (tb8 14). */
+	ck_assert_int_ne(eyes17_check_acquisition(666666, 2000, 0, 10, 2,
+		&tb8, &count), SR_OK);
+	/* Oversize clamps to EYES17_MAX_SAMPLES_DUAL per channel. */
+	ck_assert_int_eq(eyes17_check_acquisition(100000, 6000, 0, 10, 2,
+		&tb8, &count), SR_OK);
+	ck_assert_uint_eq(count, 5000);
+	/* Channel counts other than 1 or 2 fail. */
+	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 0, 10, 0,
+		&tb8, &count), SR_OK);
+	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 0, 10, 3,
+		&tb8, &count), SR_OK);
 }
 END_TEST
 
@@ -558,7 +610,9 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tt, test_timebase_10us);
 	tcase_add_test(tt, test_count_cap);
 	tcase_add_test(tt, test_capture_one_frame);
+	tcase_add_test(tt, test_capture_two_frame);
 	tcase_add_test(tt, test_fetch_channel_frame);
+	tcase_add_test(tt, test_fetch_channel_id);
 	tcase_add_test(tt, test_trigger_frame);
 	tcase_add_test(tt, test_trigger_level);
 	tcase_add_test(tk, test_gain_table);
@@ -575,6 +629,7 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tg, test_resolution);
 	tcase_add_test(tg, test_samplerate_ladder);
 	tcase_add_test(tg, test_acquisition_check);
+	tcase_add_test(tg, test_check_dual_acquisition);
 	suite_add_tcase(s, tc);
 	suite_add_tcase(s, tt);
 	suite_add_tcase(s, tk);

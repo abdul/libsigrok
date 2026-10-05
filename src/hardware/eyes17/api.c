@@ -290,7 +290,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 	serial = sdi->conn;
 
 	ret = eyes17_check_acquisition(devc->samplerate, devc->limit_samples,
-		devc->gain, devc->resolution, &tb8, &count);
+		devc->gain, devc->resolution, 1, &tb8, &count);
 	if (ret != SR_OK)
 		return ret;
 

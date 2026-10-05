@@ -101,16 +101,22 @@ int eyes17_check_resolution(int bits)
 
 /*
  * Validate a requested acquisition combo before touching hardware.
- * Oversize sample counts clamp per the Task-4 convention; a zero
- * count, an off-ladder rate, an invalid gain, or 12-bit mode fail.
+ * Oversize sample counts clamp per the Task-4 convention (dual
+ * captures clamp per channel to EYES17_MAX_SAMPLES_DUAL); a zero
+ * count, an off-ladder rate, an invalid gain, 12-bit mode, a
+ * channel count other than 1 or 2, or a dual rate below the
+ * EYES17_TB8_MIN_DUAL floor fail.
  */
 int eyes17_check_acquisition(uint64_t samplerate, uint64_t limit,
-		int gain, int resolution, uint16_t *tb8_out,
+		int gain, int resolution, int channels, uint16_t *tb8_out,
 		uint16_t *count_out)
 {
 	uint16_t tb8, count;
+	uint16_t tb8_min, count_max;
 	int ret;
 
+	if (channels != 1 && channels != 2)
+		return SR_ERR_ARG;
 	ret = eyes17_check_resolution(resolution);
 	if (ret != SR_OK)
 		return ret;
@@ -120,7 +126,11 @@ int eyes17_check_acquisition(uint64_t samplerate, uint64_t limit,
 		return SR_ERR_ARG;
 	if (limit == 0)
 		return SR_ERR_ARG;
-	count = eyes17_clamp_count((size_t)limit);
+	tb8_min = (channels == 2) ? EYES17_TB8_MIN_DUAL : EYES17_TB8_MIN;
+	count_max = (channels == 2) ? EYES17_MAX_SAMPLES_DUAL : EYES17_MAX_SAMPLES;
+	if (tb8 < tb8_min)
+		return SR_ERR_ARG;
+	count = (limit > count_max) ? count_max : (uint16_t)limit;
 	if (tb8_out)
 		*tb8_out = tb8;
 	if (count_out)
@@ -145,18 +155,36 @@ size_t eyes17_build_capture_one(uint8_t *buf, uint16_t tb8, uint16_t count)
 }
 
 /*
+ * Golden eyes.py:capture_traces CAPTURE_TWO frame
+ * [ADC=2,SUB=2,CHOSA=3]+count u16le+tb8 u16le. Plain CHOSA here;
+ * OR-ing EYES17_CHOSA_TRIGGERED is the triggered caller's job.
+ */
+size_t eyes17_build_capture_two(uint8_t *buf, uint16_t tb8, uint16_t count)
+{
+	if (!buf)
+		return 0;
+	buf[0] = EYES17_HDR_ADC;
+	buf[1] = EYES17_SUB_CAPTURE_TWO;
+	buf[2] = EYES17_CHOSA_A1;
+	eyes17_put_u16_le(buf + 3, count);
+	eyes17_put_u16_le(buf + 5, tb8);
+	return EYES17_CAPTURE_FRAME_LEN;
+}
+
+/*
  * Golden eyes.py:__fetch_channel__: the firmware holds captured data
  * for the host to pull: [ADC, GET_CAPTURE_CHANNEL, channel0, n, off]
  * (channel 0-based, n samples from offset off), then 2 x n bulk bytes
  * plus an ACK. At most EYES17_FETCH_CHUNK samples per fetch.
  */
-size_t eyes17_build_fetch_channel(uint8_t *buf, uint16_t n, uint16_t offset)
+size_t eyes17_build_fetch_channel(uint8_t *buf, uint8_t ch, uint16_t n,
+		uint16_t offset)
 {
 	if (!buf)
 		return 0;
 	buf[0] = EYES17_HDR_ADC;
 	buf[1] = EYES17_SUB_GET_CAPTURE_CHANNEL;
-	buf[2] = 0;
+	buf[2] = ch;
 	eyes17_put_u16_le(buf + 3, n);
 	eyes17_put_u16_le(buf + 5, offset);
 	return EYES17_FETCH_FRAME_LEN;
@@ -338,4 +366,120 @@ int eyes17_capture_triggered(struct sr_serial_dev_inst *serial,
 	}
 	g_free(raw);
 	return ret;
+}
+
+/*
+ * Pull both buffered channels after a CAPTURE_TWO conversion: per-channel
+ * loop of GET_CAPTURE_CHANNEL fetches (fetch byte ch selects the buffered
+ * channel), each write_cmd + bulk read + ACK, decoded per channel with
+ * eyes17_adc_to_volts(raw, gain, (int)ch).
+ */
+static int eyes17_fetch_dual_stream(struct sr_serial_dev_inst *serial,
+		uint16_t count, int gain, float *a1_out, float *a2_out)
+{
+	uint8_t fetch[5];
+	uint8_t *raw;
+	float *outs[EYES17_NUM_CHANNELS];
+	uint8_t ch;
+	uint16_t got, n;
+	size_t i;
+	int ret = SR_OK;
+
+	outs[EYES17_FETCH_CH_A1] = a1_out;
+	outs[EYES17_FETCH_CH_A2] = a2_out;
+	raw = g_malloc(EYES17_FETCH_CHUNK * 2);
+	for (ch = 0; ch < EYES17_NUM_CHANNELS; ch++) {
+		got = 0;
+		while (got < count) {
+			n = count - got;
+			if (n > EYES17_FETCH_CHUNK)
+				n = EYES17_FETCH_CHUNK;
+			fetch[0] = ch;
+			eyes17_put_u16_le(fetch + 1, n);
+			eyes17_put_u16_le(fetch + 3, got);
+			ret = eyes17_write_cmd(serial, EYES17_HDR_ADC,
+				EYES17_SUB_GET_CAPTURE_CHANNEL, fetch, sizeof(fetch));
+			if (ret != SR_OK)
+				break;
+			if (serial_read_blocking(serial, raw, (size_t)n * 2,
+					EYES17_CAPTURE_TIMEOUT_MS) != (int)((size_t)n * 2)) {
+				ret = SR_ERR_TIMEOUT;
+				break;
+			}
+			ret = eyes17_read_ack(serial);
+			if (ret != SR_OK)
+				break;
+			for (i = 0; i < n; i++)
+				outs[ch][got + i] = eyes17_adc_to_volts(
+					eyes17_get_u16_le(raw + 2 * i), gain, (int)ch);
+			got += n;
+		}
+		if (ret != SR_OK)
+			break;
+	}
+	g_free(raw);
+	return ret;
+}
+
+/*
+ * Dual-channel immediate capture: send CAPTURE_TWO with the plain CHOSA
+ * byte, wait for the per-channel conversion, then pull both channels.
+ */
+int eyes17_capture_two(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, float *a1_out,
+		float *a2_out)
+{
+	uint8_t args[5];
+	int ret;
+
+	if (!serial || !a1_out || !a2_out || count == 0)
+		return SR_ERR_ARG;
+	if (tb8 < EYES17_TB8_MIN_DUAL)
+		tb8 = EYES17_TB8_MIN_DUAL;
+	if (count > EYES17_MAX_SAMPLES_DUAL)
+		count = EYES17_MAX_SAMPLES_DUAL;
+	args[0] = EYES17_CHOSA_A1;
+	eyes17_put_u16_le(args + 1, count);
+	eyes17_put_u16_le(args + 3, tb8);
+	ret = eyes17_send_cmd(serial, EYES17_HDR_ADC,
+		EYES17_SUB_CAPTURE_TWO, args, sizeof(args));
+	if (ret != SR_OK)
+		return ret;
+	ret = eyes17_wait_conversion(serial, tb8, count);
+	if (ret != SR_OK)
+		return ret;
+	return eyes17_fetch_dual_stream(serial, count, gain, a1_out, a2_out);
+}
+
+/*
+ * Triggered dual-channel capture: configure the trigger first (golden
+ * order), then run the immediate dual path with the triggered CHOSA byte.
+ */
+int eyes17_capture_two_triggered(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, uint16_t level,
+		float *a1_out, float *a2_out)
+{
+	uint8_t args[5];
+	int ret;
+
+	if (!serial || !a1_out || !a2_out || count == 0)
+		return SR_ERR_ARG;
+	if (tb8 < EYES17_TB8_MIN_DUAL)
+		tb8 = EYES17_TB8_MIN_DUAL;
+	if (count > EYES17_MAX_SAMPLES_DUAL)
+		count = EYES17_MAX_SAMPLES_DUAL;
+	ret = eyes17_configure_trigger(serial, level);
+	if (ret != SR_OK)
+		return ret;
+	args[0] = EYES17_CHOSA_A1 | EYES17_CHOSA_TRIGGERED;
+	eyes17_put_u16_le(args + 1, count);
+	eyes17_put_u16_le(args + 3, tb8);
+	ret = eyes17_send_cmd(serial, EYES17_HDR_ADC,
+		EYES17_SUB_CAPTURE_TWO, args, sizeof(args));
+	if (ret != SR_OK)
+		return ret;
+	ret = eyes17_wait_conversion(serial, tb8, count);
+	if (ret != SR_OK)
+		return ret;
+	return eyes17_fetch_dual_stream(serial, count, gain, a1_out, a2_out);
 }

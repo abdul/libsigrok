@@ -113,6 +113,9 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 	sr_channel_new(sdi, 0, SR_CHANNEL_ANALOG, TRUE, "A1");
 	/* A2 joins disabled: default acquisitions stay single-channel (M2/M3 behavior byte-identical); enabling A2 selects dual. */
 	sr_channel_new(sdi, 1, SR_CHANNEL_ANALOG, FALSE, "A2");
+	/* A3/MIC join disabled: quad is opt-in; single/dual defaults unchanged. */
+	sr_channel_new(sdi, 2, SR_CHANNEL_ANALOG, FALSE, "A3");
+	sr_channel_new(sdi, 3, SR_CHANNEL_ANALOG, FALSE, "MIC");
 
 	return std_scan_complete(driver, g_slist_append(NULL, sdi));
 }
@@ -267,10 +270,12 @@ static int config_list(uint32_t key, GVariant **data,
 }
 
 /*
- * Single-shot A1 acquisition: validate the requested combo (including
+ * Single/dual/quad A1 acquisition: validate the requested combo (including
  * the trigger level against the current gain), run the immediate or
- * triggered capture, then emit HEADER, one ANALOG packet
+ * triggered capture, then emit HEADER, per-channel ANALOG packets
  * (SR_MQ_VOLTAGE, volts) and END. Gain selects the calibration curve.
+ * Quad is the fixed A1+A2+A3+MIC set (exactly indexes {0,1,2,3});
+ * any other enabled count/set without a golden wire path fails SR_ERR_ARG.
  */
 static int dev_acquisition_start(const struct sr_dev_inst *sdi)
 {
@@ -283,9 +288,10 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
     struct sr_analog_spec spec;
     GSList *l;
     struct sr_channel *ch;
-    struct sr_channel *ch_a1 = NULL, *ch_a2 = NULL;
+    struct sr_channel *ch_a1 = NULL, *ch_a2 = NULL, *ch_a3 = NULL, *ch_mic = NULL;
     GSList *ach1 = NULL, *ach2 = NULL;
     int n_enabled = 0, a2_enabled = 0;
+    int have_a1 = 0, have_a2 = 0, have_a3 = 0, have_mic = 0;
     uint16_t tb8, count;
     uint16_t level;
     float *volts, *volts2;
@@ -302,14 +308,22 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
             continue;
         n_enabled++;
         if (ch->index == 0)
-            ch_a1 = ch;
+            ch_a1 = ch, have_a1 = 1;
         else if (ch->index == 1)
-            a2_enabled = 1, ch_a2 = ch;
+            a2_enabled = 1, ch_a2 = ch, have_a2 = 1;
+        else if (ch->index == 2)
+            ch_a3 = ch, have_a3 = 1;
+        else if (ch->index == 3)
+            ch_mic = ch, have_mic = 1;
     }
-    if (n_enabled == 0)
-        return SR_ERR_ARG;
-    if (a2_enabled && n_enabled != 2)
+    if (n_enabled != 1 && n_enabled != 2 && n_enabled != 4)
+        return SR_ERR_ARG; /* No golden wire path (notably 3-channel). */
+    if (a2_enabled && n_enabled != 2 && n_enabled != 4)
         return SR_ERR_ARG; /* A2-only has no golden wire path. */
+    if ((have_a3 || have_mic) && n_enabled != 4)
+        return SR_ERR_ARG; /* A3/MIC only ride the fixed quad set. */
+    if (n_enabled == 4 && !(have_a1 && have_a2 && have_a3 && have_mic))
+        return SR_ERR_ARG; /* Quad is exactly A1+A2+A3+MIC. */
 
     ret = eyes17_check_acquisition(devc->samplerate, devc->limit_samples,
         devc->gain, devc->resolution, n_enabled, &tb8, &count);
@@ -354,6 +368,7 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
         return SR_OK;
     }
 
+    if (n_enabled == 2) {
     /* Dual path: fixed A1+A2 pair, per-channel volts + packets. */
     volts = g_malloc(count * sizeof(*volts));
     volts2 = g_malloc(count * sizeof(*volts2));
@@ -403,6 +418,97 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
     std_session_send_df_end(sdi);
 
     return SR_OK;
+    }
+
+    /* Quad path: fixed A1+A2+A3+MIC set, per-channel volts + packets. */
+    {
+    float *volts3, *volts4;
+    GSList *ach3 = NULL, *ach4 = NULL;
+    gboolean legacy_fw_bug;
+
+    legacy_fw_bug = (devc->fw.major < 2 ||
+        (devc->fw.major == 2 && devc->fw.minor == 0)) ? TRUE : FALSE;
+    volts = g_malloc(count * sizeof(*volts));
+    volts2 = g_malloc(count * sizeof(*volts2));
+    volts3 = g_malloc(count * sizeof(*volts3));
+    volts4 = g_malloc(count * sizeof(*volts4));
+    if (g_strcmp0(devc->trigger_source, "none") == 0)
+        ret = eyes17_capture_four(serial, tb8, count,
+            devc->gain, legacy_fw_bug, volts, volts2, volts3, volts4);
+    else
+        ret = eyes17_capture_four_triggered(serial, tb8, count,
+            devc->gain, level, legacy_fw_bug, volts, volts2, volts3, volts4);
+    if (ret != SR_OK) {
+        g_free(volts);
+        g_free(volts2);
+        g_free(volts3);
+        g_free(volts4);
+        return ret;
+    }
+
+    std_session_send_df_header(sdi);
+
+    ach1 = g_slist_append(ach1, ch_a1);
+    sr_analog_init(&analog, &encoding, &meaning, &spec,
+        EYES17_ANALOG_DIGITS);
+    analog.meaning->mq = SR_MQ_VOLTAGE;
+    analog.meaning->unit = SR_UNIT_VOLT;
+    analog.meaning->channels = ach1;
+    analog.num_samples = count;
+    analog.data = volts;
+    packet.type = SR_DF_ANALOG;
+    packet.payload = &analog;
+    sr_session_send(sdi, &packet);
+
+    ach2 = g_slist_append(ach2, ch_a2);
+    sr_analog_init(&analog, &encoding, &meaning, &spec,
+        EYES17_ANALOG_DIGITS);
+    analog.meaning->mq = SR_MQ_VOLTAGE;
+    analog.meaning->unit = SR_UNIT_VOLT;
+    analog.meaning->channels = ach2;
+    analog.num_samples = count;
+    analog.data = volts2;
+    packet.type = SR_DF_ANALOG;
+    packet.payload = &analog;
+    sr_session_send(sdi, &packet);
+
+    ach3 = g_slist_append(ach3, ch_a3);
+    sr_analog_init(&analog, &encoding, &meaning, &spec,
+        EYES17_ANALOG_DIGITS);
+    analog.meaning->mq = SR_MQ_VOLTAGE;
+    analog.meaning->unit = SR_UNIT_VOLT;
+    analog.meaning->channels = ach3;
+    analog.num_samples = count;
+    analog.data = volts3;
+    packet.type = SR_DF_ANALOG;
+    packet.payload = &analog;
+    sr_session_send(sdi, &packet);
+
+    ach4 = g_slist_append(ach4, ch_mic);
+    sr_analog_init(&analog, &encoding, &meaning, &spec,
+        EYES17_ANALOG_DIGITS);
+    analog.meaning->mq = SR_MQ_VOLTAGE;
+    analog.meaning->unit = SR_UNIT_VOLT;
+    analog.meaning->channels = ach4;
+    analog.num_samples = count;
+    analog.data = volts4;
+    packet.type = SR_DF_ANALOG;
+    packet.payload = &analog;
+    sr_session_send(sdi, &packet);
+
+    g_slist_free(ach1);
+    g_slist_free(ach2);
+    g_slist_free(ach3);
+    g_slist_free(ach4);
+    g_free(volts);
+    g_free(volts2);
+    g_free(volts3);
+    g_free(volts4);
+
+    std_session_send_df_end(sdi);
+
+    return SR_OK;
+    }
 }
 
 static struct sr_dev_driver eyes17_driver_info = {

@@ -303,8 +303,8 @@ START_TEST(test_ideal_midscale)
 	const float lsb = (float)(33.0 / 1023.0);
 
 	eyes17_calibration_load(NULL, 0);
-	ck_assert(fabsf(eyes17_adc_to_volts_ideal(511, 0)) <= lsb);
-	ck_assert(fabsf(eyes17_adc_to_volts_ideal(512, 0)) <= lsb);
+	ck_assert(fabsf(eyes17_adc_to_volts_ideal(511, 0, EYES17_CH_A1)) <= lsb);
+	ck_assert(fabsf(eyes17_adc_to_volts_ideal(512, 0, EYES17_CH_A1)) <= lsb);
 	ck_assert(fabsf(eyes17_adc_to_volts(511, 0, EYES17_CH_A1)) <= lsb);
 }
 END_TEST
@@ -314,12 +314,12 @@ START_TEST(test_ideal_endpoints)
 	float hi, lo, hi2;
 
 	eyes17_calibration_load(NULL, 0);
-	hi = eyes17_adc_to_volts_ideal(0, 0);
-	lo = eyes17_adc_to_volts_ideal(1023, 0);
+	hi = eyes17_adc_to_volts_ideal(0, 0, EYES17_CH_A1);
+	lo = eyes17_adc_to_volts_ideal(1023, 0, EYES17_CH_A1);
 	ck_assert(fabsf(hi - 16.5f) / 16.5f < 0.01f);
 	ck_assert(fabsf(lo + 16.5f) / 16.5f < 0.01f);
 	/* PGA scaling: gain index 1 (x2) halves the span. */
-	hi2 = eyes17_adc_to_volts_ideal(0, 1);
+	hi2 = eyes17_adc_to_volts_ideal(0, 1, EYES17_CH_A1);
 	ck_assert(fabsf(hi2 - 8.25f) / 8.25f < 0.01f);
 }
 END_TEST
@@ -327,7 +327,7 @@ END_TEST
 START_TEST(test_gain8_rejected)
 {
 	eyes17_calibration_load(NULL, 0);
-	ck_assert(isnan(eyes17_adc_to_volts_ideal(512, 8)));
+	ck_assert(isnan(eyes17_adc_to_volts_ideal(512, 8, EYES17_CH_A1)));
 	ck_assert(isnan(eyes17_adc_to_volts(512, 8, EYES17_CH_A1)));
 	ck_assert(isnan(eyes17_adc_to_volts(512, -1, EYES17_CH_A1)));
 	ck_assert(isnan(eyes17_adc_to_volts(512, 9, EYES17_CH_A1)));
@@ -457,14 +457,82 @@ END_TEST
 
 /*
  * A2 ideal endpoints equal A1's (same span/gains); bad channel
- * indexes are NAN, never a silent A1 alias.
+ * indexes are NAN, never a silent A1 alias. (Channel 2 is now
+ * A3, so the out-of-range probe moves to 4.)
  */
 START_TEST(test_a2_ideal_endpoints)
 {
 	ck_assert(fabsf(eyes17_adc_to_volts(0, 0, EYES17_CH_A2) - 16.5f) < 0.001f);
 	ck_assert(fabsf(eyes17_adc_to_volts(1023, 0, EYES17_CH_A2) + 16.5f) < 0.001f);
-	ck_assert(isnan(eyes17_adc_to_volts(512, 0, 2)));
+	ck_assert(isnan(eyes17_adc_to_volts(512, 0, 4)));
 	ck_assert(isnan(eyes17_adc_to_volts(512, 0, -1)));
+}
+END_TEST
+
+/*
+ * A1 ideal triple + A3 23%-off triple in one blob: load succeeds,
+ * A1 converts ideal, A3 converts its installed poly (row 0).
+ * Triple (c2=0.0f, c1=0.0018f, c0=-3.3f): fit at 4095 = 4.071,
+ * err 23.4% < 30%. A3 convert at raw 1023 -> ~4.071 V.
+ */
+START_TEST(test_a3_section_parse)
+{
+	static const uint8_t blob[] =
+		"ExpEYES>|A1|<"
+		"\x00\x00\x00\x00\x41\x08\x04\xbc\x00\x00\x84\x41"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		">|A3|<"
+		"\x00\x00\x00\x00\xfa\xed\xeb\x3a\x33\x33\x53\xc0"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+		"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+	float v_a1, v_a3;
+
+	ck_assert(eyes17_calibration_load(blob, sizeof(blob) - 1));
+	v_a1 = eyes17_adc_to_volts(1023, 0, EYES17_CH_A1);
+	ck_assert(fabsf(v_a1 - (-16.5f)) < 0.01f);
+	v_a3 = eyes17_adc_to_volts(1023, 0, EYES17_CH_A3);
+	ck_assert(fabsf(v_a3 - 4.071f) < 0.05f);
+}
+END_TEST
+
+/*
+ * A3/MIC ignore the gain index (golden: no PGA, gain fixed 0):
+ * converting with gain row 5 returns the row-0 value, never
+ * row 5's curve. MIC endpoints: raw 0 -> -3.3, raw 1023 -> +3.3.
+ */
+START_TEST(test_a3_gain_pinned_row0)
+{
+	float v_row0, v_row5;
+
+	v_row0 = eyes17_adc_to_volts(1023, 0, EYES17_CH_A3);
+	v_row5 = eyes17_adc_to_volts(1023, 5, EYES17_CH_A3);
+	ck_assert(fabsf(v_row0 - v_row5) < 0.001f);
+	ck_assert(fabsf(eyes17_adc_to_volts(0, 0, EYES17_CH_MIC) + 3.3f) < 0.001f);
+	ck_assert(fabsf(eyes17_adc_to_volts(1023, 0, EYES17_CH_MIC) - 3.3f) < 0.001f);
+	ck_assert(isnan(eyes17_adc_to_volts(512, 0, 4)));
+	ck_assert(isnan(eyes17_adc_to_volts(512, 0, -1)));
+}
+END_TEST
+
+/*
+ * A3 ideal mid-scale: raw 512 (x = 2049.5) -> ~0.003 V
+ * (non-inverted span; contrast A1's -0.016 at the same code).
+ */
+START_TEST(test_a3_ideal_mid)
+{
+	ck_assert(fabsf(eyes17_adc_to_volts(512, 0, EYES17_CH_A3) - 0.003f) < 0.02f);
 }
 END_TEST
 
@@ -624,6 +692,9 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tk, test_valid_poly_used);
 	tcase_add_test(tk, test_a2_section_parse);
 	tcase_add_test(tk, test_a2_ideal_endpoints);
+	tcase_add_test(tk, test_a3_section_parse);
+	tcase_add_test(tk, test_a3_gain_pinned_row0);
+	tcase_add_test(tk, test_a3_ideal_mid);
 	tcase_add_test(tg, test_range_mapping);
 	tcase_add_test(tg, test_range_reject);
 	tcase_add_test(tg, test_resolution);

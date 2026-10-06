@@ -53,12 +53,16 @@
 #define EYES17_TIMEBASE_MIN_US 1.5
 #define EYES17_TB8_MIN 12
 #define EYES17_CHOSA_A1 3
-/* Capture channels: 0 = A1, 1 = A2. A2 shares A1's gains, span,
- * 30% rule and ideal form (golden achan.py:4,19,103-113); only the
- * flash polys differ per channel. */
-#define EYES17_NUM_CHANNELS 2
+/* Capture channels: 0 = A1, 1 = A2, 2 = A3, 3 = MIC.
+ * A3/MIC share the gains list, 30% rule and ideal form
+ * (golden achan.py:3,103-113); spans differ ([-3.3,+3.3]
+ * non-inverted, achan.py:19-20) and the effective gain row is
+ * always 0 (no PGA — gainPGAs has A1/A2 only, achan.py:29). */
+#define EYES17_NUM_CHANNELS 4
 #define EYES17_CH_A1 0
 #define EYES17_CH_A2 1
+#define EYES17_CH_A3 2
+#define EYES17_CH_MIC 3
 /* Trigger flag OR'd into the CHOSA byte (golden eyes.py:capture_traces:837). */
 #define EYES17_CHOSA_TRIGGERED 0x80
 #define EYES17_CAPTURE_FRAME_LEN 7
@@ -137,7 +141,7 @@ SR_PRIV int eyes17_configure_trigger(struct sr_serial_dev_inst *serial, uint16_t
 #define EYES17_GAIN_EXTERNAL 8
 SR_PRIV double eyes17_gain_factor(int gain);
 SR_PRIV gboolean eyes17_gain_is_valid(int gain);
-SR_PRIV float eyes17_adc_to_volts_ideal(uint16_t raw, int gain);
+SR_PRIV float eyes17_adc_to_volts_ideal(uint16_t raw, int gain, int ch);
 SR_PRIV gboolean eyes17_calibration_is_ready(void);
 SR_PRIV gboolean eyes17_calibration_load(const uint8_t *flash, size_t len);
 SR_PRIV int eyes17_check_trigger(const char *source, const char *slope, double level_volts, int gain, uint16_t *level_out);

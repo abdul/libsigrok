@@ -78,6 +78,18 @@
 #define EYES17_MAX_SAMPLES_DUAL 5000
 #define EYES17_FETCH_CH_A1 0
 #define EYES17_FETCH_CH_A2 1
+/* Quad capture (acquisition.c, M5). Golden eyes.py:capture_traces
+ * num==4: [ADC, CAPTURE_FOUR, CHOSA|trigger] + count + tb8 + ACK.
+ * Channel byte is A1's CHOSA (sel fixed A1); A2/A3/MIC implicit.
+ * Floor 1.75 us (tb8 14), cap 2500/channel. Fetch bytes 0..3
+ * (golden __fetch_channel__: channel_number - 1). FW <= 2.0 needs
+ * the raw preamble [02,04,CHOSA,02,00,16,00] + 1-byte read first. */
+#define EYES17_SUB_CAPTURE_FOUR 4
+#define EYES17_TIMEBASE_MIN_QUAD_US 1.75
+#define EYES17_TB8_MIN_QUAD 14
+#define EYES17_MAX_SAMPLES_QUAD 2500
+#define EYES17_FETCH_CH_A3 2
+#define EYES17_FETCH_CH_MIC 3
 #define EYES17_CAPTURE_TIMEOUT_MS 2000
 
 struct eyes17_version {
@@ -154,6 +166,16 @@ SR_PRIV int eyes17_capture_two_triggered(struct sr_serial_dev_inst *serial,
 		float *a1_out, float *a2_out);
 SR_PRIV int eyes17_capture_one(struct sr_serial_dev_inst *serial,
 		uint16_t tb8, uint16_t count, int gain, float *volts_out);
+SR_PRIV size_t eyes17_build_capture_four(uint8_t *buf, uint16_t tb8,
+		uint16_t count);
+SR_PRIV size_t eyes17_build_quad_bug_preamble(uint8_t *buf, uint8_t chosa);
+SR_PRIV int eyes17_capture_four(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, gboolean legacy_fw_bug,
+		float *v1_out, float *v2_out, float *v3_out, float *v4_out);
+SR_PRIV int eyes17_capture_four_triggered(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, uint16_t level,
+		gboolean legacy_fw_bug,
+		float *v1_out, float *v2_out, float *v3_out, float *v4_out);
 
 /* Samplerate ladder, resolution gate, combo validation (Task 6). */
 SR_PRIV const uint64_t *eyes17_samplerate_list(unsigned *n);

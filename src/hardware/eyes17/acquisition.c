@@ -115,7 +115,7 @@ int eyes17_check_acquisition(uint64_t samplerate, uint64_t limit,
 	uint16_t tb8_min, count_max;
 	int ret;
 
-	if (channels != 1 && channels != 2)
+	if (channels != 1 && channels != 2 && channels != 4)
 		return SR_ERR_ARG;
 	ret = eyes17_check_resolution(resolution);
 	if (ret != SR_OK)
@@ -126,8 +126,10 @@ int eyes17_check_acquisition(uint64_t samplerate, uint64_t limit,
 		return SR_ERR_ARG;
 	if (limit == 0)
 		return SR_ERR_ARG;
-	tb8_min = (channels == 2) ? EYES17_TB8_MIN_DUAL : EYES17_TB8_MIN;
-	count_max = (channels == 2) ? EYES17_MAX_SAMPLES_DUAL : EYES17_MAX_SAMPLES;
+	tb8_min = (channels == 2) ? EYES17_TB8_MIN_DUAL :
+		((channels == 4) ? EYES17_TB8_MIN_QUAD : EYES17_TB8_MIN);
+	count_max = (channels == 2) ? EYES17_MAX_SAMPLES_DUAL :
+		((channels == 4) ? EYES17_MAX_SAMPLES_QUAD : EYES17_MAX_SAMPLES);
 	if (tb8 < tb8_min)
 		return SR_ERR_ARG;
 	count = (limit > count_max) ? count_max : (uint16_t)limit;
@@ -169,6 +171,43 @@ size_t eyes17_build_capture_two(uint8_t *buf, uint16_t tb8, uint16_t count)
 	eyes17_put_u16_le(buf + 3, count);
 	eyes17_put_u16_le(buf + 5, tb8);
 	return EYES17_CAPTURE_FRAME_LEN;
+}
+/*
+ * Golden eyes.py:capture_traces num==4 frame
+ * [ADC=2,SUB=4,CHOSA=3]+count u16le+tb8 u16le. Plain CHOSA here;
+ * OR-ing EYES17_CHOSA_TRIGGERED is the triggered caller's job.
+ */
+size_t eyes17_build_capture_four(uint8_t *buf, uint16_t tb8,
+		uint16_t count)
+{
+	if (!buf)
+		return 0;
+	buf[0] = EYES17_HDR_ADC;
+	buf[1] = EYES17_SUB_CAPTURE_FOUR;
+	buf[2] = EYES17_CHOSA_A1;
+	eyes17_put_u16_le(buf + 3, count);
+	eyes17_put_u16_le(buf + 5, tb8);
+	return EYES17_CAPTURE_FRAME_LEN;
+}
+
+/*
+ * SJ-2.0 firmware-bug preamble (golden capture_traces:756): raw bytes
+ * [02,04,CHOSA,02,00,16,00] written raw before the normal frame, then
+ * 1 byte read back. No ACK framing — the caller handles the raw
+ * write and the 1-byte read exactly like the golden fd.write/read.
+ */
+size_t eyes17_build_quad_bug_preamble(uint8_t *buf, uint8_t chosa)
+{
+	if (!buf)
+		return 0;
+	buf[0] = 0x02;
+	buf[1] = 0x04;
+	buf[2] = chosa;
+	buf[3] = 0x02;
+	buf[4] = 0x00;
+	buf[5] = 0x16;
+	buf[6] = 0x00;
+	return 7;
 }
 
 /*
@@ -379,7 +418,7 @@ static int eyes17_fetch_dual_stream(struct sr_serial_dev_inst *serial,
 {
 	uint8_t fetch[5];
 	uint8_t *raw;
-	float *outs[EYES17_NUM_CHANNELS];
+	float *outs[2];
 	uint8_t ch;
 	uint16_t got, n;
 	size_t i;
@@ -388,7 +427,7 @@ static int eyes17_fetch_dual_stream(struct sr_serial_dev_inst *serial,
 	outs[EYES17_FETCH_CH_A1] = a1_out;
 	outs[EYES17_FETCH_CH_A2] = a2_out;
 	raw = g_malloc(EYES17_FETCH_CHUNK * 2);
-	for (ch = 0; ch < EYES17_NUM_CHANNELS; ch++) {
+	for (ch = 0; ch <= EYES17_FETCH_CH_A2; ch++) {
 		got = 0;
 		while (got < count) {
 			n = count - got;
@@ -482,4 +521,162 @@ int eyes17_capture_two_triggered(struct sr_serial_dev_inst *serial,
 	if (ret != SR_OK)
 		return ret;
 	return eyes17_fetch_dual_stream(serial, count, gain, a1_out, a2_out);
+}
+
+/*
+ * SJ-2.0 firmware-bug preamble send (golden capture_traces:756): write
+ * the 7 raw bytes and read 1 byte back, before the normal CAPTURE_FOUR
+ * frame. Only called when legacy_fw_bug is TRUE (probed FW <= 2.0).
+ */
+static int eyes17_send_quad_bug_preamble(struct sr_serial_dev_inst *serial,
+		uint8_t chosa)
+{
+	uint8_t buf[7];
+	uint8_t dummy;
+
+	eyes17_build_quad_bug_preamble(buf, chosa);
+	if (serial_write_blocking(serial, buf, sizeof(buf),
+			EYES17_WRITE_TIMEOUT_MS) != (int)sizeof(buf))
+		return SR_ERR_IO;
+	if (serial_read_blocking(serial, &dummy, 1,
+			EYES17_ACK_TIMEOUT_MS) != 1)
+		return SR_ERR_TIMEOUT;
+	return SR_OK;
+}
+
+/*
+ * Pull all four buffered channels after a CAPTURE_FOUR conversion:
+ * per-channel loop of GET_CAPTURE_CHANNEL fetches (fetch bytes 0-3),
+ * each write_cmd + bulk read + ACK, decoded per channel with
+ * eyes17_adc_to_volts(raw, gain, (int)ch) — the gain-row-0 rule for
+ * A3/MIC lives inside the converter.
+ */
+static int eyes17_fetch_quad_stream(struct sr_serial_dev_inst *serial,
+		uint16_t count, int gain, float *v1_out, float *v2_out,
+		float *v3_out, float *v4_out)
+{
+	uint8_t fetch[5];
+	uint8_t *raw;
+	float *outs[EYES17_NUM_CHANNELS];
+	uint8_t ch;
+	uint16_t got, n;
+	size_t i;
+	int ret = SR_OK;
+
+	outs[EYES17_FETCH_CH_A1] = v1_out;
+	outs[EYES17_FETCH_CH_A2] = v2_out;
+	outs[EYES17_FETCH_CH_A3] = v3_out;
+	outs[EYES17_FETCH_CH_MIC] = v4_out;
+	raw = g_malloc(EYES17_FETCH_CHUNK * 2);
+	for (ch = 0; ch < EYES17_NUM_CHANNELS; ch++) {
+		got = 0;
+		while (got < count) {
+			n = count - got;
+			if (n > EYES17_FETCH_CHUNK)
+				n = EYES17_FETCH_CHUNK;
+			fetch[0] = ch;
+			eyes17_put_u16_le(fetch + 1, n);
+			eyes17_put_u16_le(fetch + 3, got);
+			ret = eyes17_write_cmd(serial, EYES17_HDR_ADC,
+				EYES17_SUB_GET_CAPTURE_CHANNEL, fetch, sizeof(fetch));
+			if (ret != SR_OK)
+				break;
+			if (serial_read_blocking(serial, raw, (size_t)n * 2,
+					EYES17_CAPTURE_TIMEOUT_MS) != (int)((size_t)n * 2)) {
+				ret = SR_ERR_TIMEOUT;
+				break;
+			}
+			ret = eyes17_read_ack(serial);
+			if (ret != SR_OK)
+				break;
+			for (i = 0; i < n; i++)
+				outs[ch][got + i] = eyes17_adc_to_volts(
+					eyes17_get_u16_le(raw + 2 * i), gain, (int)ch);
+			got += n;
+		}
+		if (ret != SR_OK)
+			break;
+	}
+	g_free(raw);
+	return ret;
+}
+
+/*
+ * Quad-channel immediate capture: send CAPTURE_FOUR with the plain
+ * CHOSA byte (sel fixed A1), wait for the per-channel conversion,
+ * then pull all four channels. legacy_fw_bug sends the SJ-2.0 raw
+ * preamble first.
+ */
+int eyes17_capture_four(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, gboolean legacy_fw_bug,
+		float *v1_out, float *v2_out, float *v3_out, float *v4_out)
+{
+	uint8_t args[5];
+	int ret;
+
+	if (!serial || !v1_out || !v2_out || !v3_out || !v4_out || count == 0)
+		return SR_ERR_ARG;
+	if (tb8 < EYES17_TB8_MIN_QUAD)
+		tb8 = EYES17_TB8_MIN_QUAD;
+	if (count > EYES17_MAX_SAMPLES_QUAD)
+		count = EYES17_MAX_SAMPLES_QUAD;
+	if (legacy_fw_bug) {
+		ret = eyes17_send_quad_bug_preamble(serial, EYES17_CHOSA_A1);
+		if (ret != SR_OK)
+			return ret;
+	}
+	args[0] = EYES17_CHOSA_A1;
+	eyes17_put_u16_le(args + 1, count);
+	eyes17_put_u16_le(args + 3, tb8);
+	ret = eyes17_send_cmd(serial, EYES17_HDR_ADC,
+		EYES17_SUB_CAPTURE_FOUR, args, sizeof(args));
+	if (ret != SR_OK)
+		return ret;
+	ret = eyes17_wait_conversion(serial, tb8, count);
+	if (ret != SR_OK)
+		return ret;
+	return eyes17_fetch_quad_stream(serial, count, gain,
+		v1_out, v2_out, v3_out, v4_out);
+}
+
+/*
+ * Triggered quad-channel capture: configure the trigger first (golden
+ * order), then run the immediate quad path with the triggered CHOSA
+ * byte. Trigger gates A1 only, M3 scope unchanged.
+ */
+int eyes17_capture_four_triggered(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, uint16_t level,
+		gboolean legacy_fw_bug,
+		float *v1_out, float *v2_out, float *v3_out, float *v4_out)
+{
+	uint8_t args[5];
+	int ret;
+
+	if (!serial || !v1_out || !v2_out || !v3_out || !v4_out || count == 0)
+		return SR_ERR_ARG;
+	if (tb8 < EYES17_TB8_MIN_QUAD)
+		tb8 = EYES17_TB8_MIN_QUAD;
+	if (count > EYES17_MAX_SAMPLES_QUAD)
+		count = EYES17_MAX_SAMPLES_QUAD;
+	ret = eyes17_configure_trigger(serial, level);
+	if (ret != SR_OK)
+		return ret;
+	if (legacy_fw_bug) {
+		ret = eyes17_send_quad_bug_preamble(serial,
+			EYES17_CHOSA_A1 | EYES17_CHOSA_TRIGGERED);
+		if (ret != SR_OK)
+			return ret;
+	}
+	args[0] = EYES17_CHOSA_A1 | EYES17_CHOSA_TRIGGERED;
+	eyes17_put_u16_le(args + 1, count);
+	eyes17_put_u16_le(args + 3, tb8);
+	ret = eyes17_send_cmd(serial, EYES17_HDR_ADC,
+		EYES17_SUB_CAPTURE_FOUR, args, sizeof(args));
+	if (ret != SR_OK)
+		return ret;
+	ret = eyes17_wait_conversion(serial, tb8, count);
+	if (ret != SR_OK)
+		return ret;
+	return eyes17_fetch_quad_stream(serial, count, gain,
+		v1_out, v2_out, v3_out, v4_out);
 }

@@ -141,6 +141,35 @@ START_TEST(test_capture_two_frame)
 	ck_assert_int_eq(memcmp(buf, expect, sizeof(expect)), 0);
 }
 END_TEST
+/*
+ * Golden eyes.py:capture_traces num==4: [ADC=2, CAPTURE_FOUR=4,
+ * CHOSA=3] + count u16le + tb8 u16le. count=100, tb8=80.
+ */
+START_TEST(test_capture_four_frame)
+{
+	uint8_t buf[EYES17_CAPTURE_FRAME_LEN];
+	uint8_t expect[] = { 2, 4, 0x03, 0x64, 0x00, 0x50, 0x00 };
+
+	ck_assert_uint_eq(eyes17_build_capture_four(buf, 80, 100),
+		sizeof(expect));
+	ck_assert_int_eq(memcmp(buf, expect, sizeof(expect)), 0);
+}
+END_TEST
+
+/*
+ * SJ-2.0 firmware-bug preamble (golden capture_traces:756):
+ * raw [02,04,CHOSA,02,00,16,00] before the normal frame.
+ */
+START_TEST(test_quad_bug_preamble)
+{
+	uint8_t buf[7];
+	uint8_t expect[] = { 0x02, 0x04, 0x03, 0x02, 0x00, 0x16, 0x00 };
+
+	ck_assert_uint_eq(eyes17_build_quad_bug_preamble(buf,
+		EYES17_CHOSA_A1), sizeof(expect));
+	ck_assert_int_eq(memcmp(buf, expect, sizeof(expect)), 0);
+}
+END_TEST
 
 /*
  * Golden eyes.py fetch [ADC,7,ch-1,n,offset]: second channel
@@ -655,8 +684,35 @@ START_TEST(test_check_dual_acquisition)
 	/* Channel counts other than 1 or 2 fail. */
 	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 0, 10, 0,
 		&tb8, &count), SR_OK);
+	/* Channel counts other than 1, 2 or 4 fail. */
 	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 0, 10, 3,
 		&tb8, &count), SR_OK);
+}
+END_TEST
+/*
+ * Quad validation: same ladder, 1.75 us floor (tb8 14), 2500/ch cap.
+ * 3 channels fail explicitly (no driver intake despite golden frame).
+ */
+START_TEST(test_check_quad_acquisition)
+{
+	uint16_t tb8 = 0, count = 0;
+
+	ck_assert_int_eq(eyes17_check_acquisition(500000, 2000, 0, 10,
+		4, &tb8, &count), SR_OK);
+	ck_assert_uint_eq(tb8, 16);
+	ck_assert_uint_eq(count, 2000);
+	/* 666666 Hz is tb8 12: below the quad floor. */
+	ck_assert_int_ne(eyes17_check_acquisition(666666, 100, 0, 10,
+		4, &tb8, &count), SR_OK);
+	/* Quad cap clamps per the single/dual convention. */
+	ck_assert_int_eq(eyes17_check_acquisition(100000, 3000, 0, 10,
+		4, &tb8, &count), SR_OK);
+	ck_assert_uint_eq(count, 2500);
+	/* Only 1-, 2- and 4-channel captures have a driver wire path. */
+	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 0, 10,
+		3, &tb8, &count), SR_OK);
+	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 0, 10,
+		5, &tb8, &count), SR_OK);
 }
 END_TEST
 
@@ -679,6 +735,8 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tt, test_count_cap);
 	tcase_add_test(tt, test_capture_one_frame);
 	tcase_add_test(tt, test_capture_two_frame);
+	tcase_add_test(tt, test_capture_four_frame);
+	tcase_add_test(tt, test_quad_bug_preamble);
 	tcase_add_test(tt, test_fetch_channel_frame);
 	tcase_add_test(tt, test_fetch_channel_id);
 	tcase_add_test(tt, test_trigger_frame);
@@ -701,6 +759,7 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tg, test_samplerate_ladder);
 	tcase_add_test(tg, test_acquisition_check);
 	tcase_add_test(tg, test_check_dual_acquisition);
+	tcase_add_test(tg, test_check_quad_acquisition);
 	suite_add_tcase(s, tc);
 	suite_add_tcase(s, tt);
 	suite_add_tcase(s, tk);

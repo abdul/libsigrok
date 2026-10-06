@@ -662,8 +662,9 @@ int eyes17_capture_four_triggered(struct sr_serial_dev_inst *serial,
 	if (ret != SR_OK)
 		return ret;
 	if (legacy_fw_bug) {
-		ret = eyes17_send_quad_bug_preamble(serial,
-			EYES17_CHOSA_A1 | EYES17_CHOSA_TRIGGERED);
+		/* Golden preamble carries plain CHOSA; the trigger bit
+		 * lives only in the capture frame below. */
+		ret = eyes17_send_quad_bug_preamble(serial, EYES17_CHOSA_A1);
 		if (ret != SR_OK)
 			return ret;
 	}

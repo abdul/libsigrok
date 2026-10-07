@@ -270,6 +270,85 @@ static int eyes17_wait_conversion(struct sr_serial_dev_inst *serial,
 		g_usleep(10000);
 	}
 }
+/*
+ * Shared fetch helper: pull buffered samples after a conversion with
+ * chunked GET_CAPTURE_CHANNEL fetches (at most EYES17_FETCH_CHUNK
+ * samples per fetch), each a write + 2n-byte bulk read + ACK, then
+ * decode with the caller's convert fn. channels[s] is the fetch byte
+ * and the convert channel index for stream s into outs[s]; the A3/MIC
+ * gain-row-0 rule lives inside the convert fns. Callers pass count
+ * already clamped.
+ */
+typedef float (*eyes17_convert_fn)(uint16_t raw, int gain, int ch);
+
+static int eyes17_fetch_streams(struct sr_serial_dev_inst *serial,
+		uint16_t count, int gain, const uint8_t *channels,
+		float *const *outs, size_t nstreams, eyes17_convert_fn convert)
+{
+	uint8_t fetch[5];
+	uint8_t *raw;
+	uint16_t got, n;
+	size_t i, s;
+	int ret = SR_OK;
+
+	raw = g_malloc(EYES17_FETCH_CHUNK * 2);
+	for (s = 0; s < nstreams; s++) {
+		got = 0;
+		while (got < count) {
+			n = count - got;
+			if (n > EYES17_FETCH_CHUNK)
+				n = EYES17_FETCH_CHUNK;
+			fetch[0] = channels[s];
+			eyes17_put_u16_le(fetch + 1, n);
+			eyes17_put_u16_le(fetch + 3, got);
+			ret = eyes17_write_cmd(serial, EYES17_HDR_ADC,
+				EYES17_SUB_GET_CAPTURE_CHANNEL, fetch, sizeof(fetch));
+			if (ret != SR_OK)
+				break;
+			if (serial_read_blocking(serial, raw, (size_t)n * 2,
+					EYES17_CAPTURE_TIMEOUT_MS) != (int)((size_t)n * 2)) {
+				ret = SR_ERR_TIMEOUT;
+				break;
+			}
+			ret = eyes17_read_ack(serial);
+			if (ret != SR_OK)
+				break;
+			for (i = 0; i < n; i++)
+				outs[s][got + i] = convert(
+					eyes17_get_u16_le(raw + 2 * i), gain,
+					(int)channels[s]);
+			got += n;
+		}
+		if (ret != SR_OK)
+			break;
+	}
+	g_free(raw);
+	return ret;
+}
+
+/*
+ * Single-stream fetch entries: fetch byte 0 decoded on A1, 10-bit via
+ * eyes17_adc_to_volts and 12-bit via eyes17_adc_to_volts_12 (x = raw).
+ */
+static int eyes17_fetch_single_10(struct sr_serial_dev_inst *serial,
+		uint16_t count, int gain, float *volts_out)
+{
+	static const uint8_t channels[] = { 0 };
+	float *outs[] = { volts_out };
+
+	return eyes17_fetch_streams(serial, count, gain, channels, outs,
+		G_N_ELEMENTS(channels), eyes17_adc_to_volts);
+}
+
+static int eyes17_fetch_single_12(struct sr_serial_dev_inst *serial,
+		uint16_t count, int gain, float *volts_out)
+{
+	static const uint8_t channels[] = { 0 };
+	float *outs[] = { volts_out };
+
+	return eyes17_fetch_streams(serial, count, gain, channels, outs,
+		G_N_ELEMENTS(channels), eyes17_adc_to_volts_12);
+}
 
 /*
  * Single-channel immediate capture (trigger-disabled path): send
@@ -283,10 +362,6 @@ int eyes17_capture_one(struct sr_serial_dev_inst *serial,
 		uint16_t tb8, uint16_t count, int gain, float *volts_out)
 {
 	uint8_t args[5];
-	uint8_t fetch[5];
-	uint8_t *raw;
-	uint16_t got, n;
-	size_t i;
 	int ret;
 
 	if (!serial || !volts_out || count == 0)
@@ -304,34 +379,7 @@ int eyes17_capture_one(struct sr_serial_dev_inst *serial,
 	ret = eyes17_wait_conversion(serial, tb8, count);
 	if (ret != SR_OK)
 		return ret;
-	raw = g_malloc(EYES17_FETCH_CHUNK * 2);
-	got = 0;
-	while (got < count) {
-		n = count - got;
-		if (n > EYES17_FETCH_CHUNK)
-			n = EYES17_FETCH_CHUNK;
-		fetch[0] = 0;
-		eyes17_put_u16_le(fetch + 1, n);
-		eyes17_put_u16_le(fetch + 3, got);
-		ret = eyes17_write_cmd(serial, EYES17_HDR_ADC,
-			EYES17_SUB_GET_CAPTURE_CHANNEL, fetch, sizeof(fetch));
-		if (ret != SR_OK)
-			break;
-		if (serial_read_blocking(serial, raw, (size_t)n * 2,
-				EYES17_CAPTURE_TIMEOUT_MS) != (int)((size_t)n * 2)) {
-			ret = SR_ERR_TIMEOUT;
-			break;
-		}
-		ret = eyes17_read_ack(serial);
-		if (ret != SR_OK)
-			break;
-		for (i = 0; i < n; i++)
-			volts_out[got + i] = eyes17_adc_to_volts(
-				eyes17_get_u16_le(raw + 2 * i), gain, EYES17_CH_A1);
-		got += n;
-	}
-	g_free(raw);
-	return ret;
+	return eyes17_fetch_single_10(serial, count, gain, volts_out);
 }
 
 int eyes17_check_trigger(const char *source, const char *slope,
@@ -365,10 +413,6 @@ int eyes17_capture_triggered(struct sr_serial_dev_inst *serial,
 		float *volts_out)
 {
 	uint8_t args[5];
-	uint8_t fetch[5];
-	uint8_t *raw;
-	uint16_t got, n;
-	size_t i;
 	int ret;
 
 	if (!serial || !volts_out || count == 0)
@@ -389,34 +433,7 @@ int eyes17_capture_triggered(struct sr_serial_dev_inst *serial,
 	ret = eyes17_wait_conversion(serial, tb8, count);
 	if (ret != SR_OK)
 		return ret;
-	raw = g_malloc(EYES17_FETCH_CHUNK * 2);
-	got = 0;
-	while (got < count) {
-		n = count - got;
-		if (n > EYES17_FETCH_CHUNK)
-			n = EYES17_FETCH_CHUNK;
-		fetch[0] = 0;
-		eyes17_put_u16_le(fetch + 1, n);
-		eyes17_put_u16_le(fetch + 3, got);
-		ret = eyes17_write_cmd(serial, EYES17_HDR_ADC,
-			EYES17_SUB_GET_CAPTURE_CHANNEL, fetch, sizeof(fetch));
-		if (ret != SR_OK)
-			break;
-		if (serial_read_blocking(serial, raw, (size_t)n * 2,
-				EYES17_CAPTURE_TIMEOUT_MS) != (int)((size_t)n * 2)) {
-			ret = SR_ERR_TIMEOUT;
-			break;
-		}
-		ret = eyes17_read_ack(serial);
-		if (ret != SR_OK)
-			break;
-		for (i = 0; i < n; i++)
-			volts_out[got + i] = eyes17_adc_to_volts(
-				eyes17_get_u16_le(raw + 2 * i), gain, EYES17_CH_A1);
-		got += n;
-	}
-	g_free(raw);
-	return ret;
+	return eyes17_fetch_single_10(serial, count, gain, volts_out);
 }
 
 /*
@@ -444,10 +461,6 @@ int eyes17_capture_12bit(struct sr_serial_dev_inst *serial,
 		uint16_t tb8, uint16_t count, int gain, float *volts_out)
 {
 	uint8_t args[5];
-	uint8_t fetch[5];
-	uint8_t *raw;
-	uint16_t got, n;
-	size_t i;
 	int ret;
 
 	if (!serial || !volts_out || count == 0)
@@ -465,34 +478,7 @@ int eyes17_capture_12bit(struct sr_serial_dev_inst *serial,
 	ret = eyes17_wait_conversion(serial, tb8, count);
 	if (ret != SR_OK)
 		return ret;
-	raw = g_malloc(EYES17_FETCH_CHUNK * 2);
-	got = 0;
-	while (got < count) {
-		n = count - got;
-		if (n > EYES17_FETCH_CHUNK)
-			n = EYES17_FETCH_CHUNK;
-		fetch[0] = 0;
-		eyes17_put_u16_le(fetch + 1, n);
-		eyes17_put_u16_le(fetch + 3, got);
-		ret = eyes17_write_cmd(serial, EYES17_HDR_ADC,
-			EYES17_SUB_GET_CAPTURE_CHANNEL, fetch, sizeof(fetch));
-		if (ret != SR_OK)
-			break;
-		if (serial_read_blocking(serial, raw, (size_t)n * 2,
-				EYES17_CAPTURE_TIMEOUT_MS) != (int)((size_t)n * 2)) {
-			ret = SR_ERR_TIMEOUT;
-			break;
-		}
-		ret = eyes17_read_ack(serial);
-		if (ret != SR_OK)
-			break;
-		for (i = 0; i < n; i++)
-			volts_out[got + i] = eyes17_adc_to_volts_12(
-				eyes17_get_u16_le(raw + 2 * i), gain, EYES17_CH_A1);
-		got += n;
-	}
-	g_free(raw);
-	return ret;
+	return eyes17_fetch_single_12(serial, count, gain, volts_out);
 }
 
 /*
@@ -506,10 +492,6 @@ int eyes17_capture_12bit_triggered(struct sr_serial_dev_inst *serial,
 		float *volts_out)
 {
 	uint8_t args[5];
-	uint8_t fetch[5];
-	uint8_t *raw;
-	uint16_t got, n;
-	size_t i;
 	int ret;
 
 	if (!serial || !volts_out || count == 0)
@@ -530,87 +512,23 @@ int eyes17_capture_12bit_triggered(struct sr_serial_dev_inst *serial,
 	ret = eyes17_wait_conversion(serial, tb8, count);
 	if (ret != SR_OK)
 		return ret;
-	raw = g_malloc(EYES17_FETCH_CHUNK * 2);
-	got = 0;
-	while (got < count) {
-		n = count - got;
-		if (n > EYES17_FETCH_CHUNK)
-			n = EYES17_FETCH_CHUNK;
-		fetch[0] = 0;
-		eyes17_put_u16_le(fetch + 1, n);
-		eyes17_put_u16_le(fetch + 3, got);
-		ret = eyes17_write_cmd(serial, EYES17_HDR_ADC,
-			EYES17_SUB_GET_CAPTURE_CHANNEL, fetch, sizeof(fetch));
-		if (ret != SR_OK)
-			break;
-		if (serial_read_blocking(serial, raw, (size_t)n * 2,
-				EYES17_CAPTURE_TIMEOUT_MS) != (int)((size_t)n * 2)) {
-			ret = SR_ERR_TIMEOUT;
-			break;
-		}
-		ret = eyes17_read_ack(serial);
-		if (ret != SR_OK)
-			break;
-		for (i = 0; i < n; i++)
-			volts_out[got + i] = eyes17_adc_to_volts_12(
-				eyes17_get_u16_le(raw + 2 * i), gain, EYES17_CH_A1);
-		got += n;
-	}
-	g_free(raw);
-	return ret;
+	return eyes17_fetch_single_12(serial, count, gain, volts_out);
 }
 
 /*
- * Pull both buffered channels after a CAPTURE_TWO conversion: per-channel
- * loop of GET_CAPTURE_CHANNEL fetches (fetch byte ch selects the buffered
- * channel), each write_cmd + bulk read + ACK, decoded per channel with
- * eyes17_adc_to_volts(raw, gain, (int)ch).
+ * Pull both buffered channels after a CAPTURE_TWO conversion: fetch
+ * bytes 0-1 decoded per channel with eyes17_adc_to_volts.
  */
 static int eyes17_fetch_dual_stream(struct sr_serial_dev_inst *serial,
 		uint16_t count, int gain, float *a1_out, float *a2_out)
 {
-	uint8_t fetch[5];
-	uint8_t *raw;
-	float *outs[2];
-	uint8_t ch;
-	uint16_t got, n;
-	size_t i;
-	int ret = SR_OK;
+	static const uint8_t channels[] = {
+		EYES17_FETCH_CH_A1, EYES17_FETCH_CH_A2,
+	};
+	float *outs[] = { a1_out, a2_out };
 
-	outs[EYES17_FETCH_CH_A1] = a1_out;
-	outs[EYES17_FETCH_CH_A2] = a2_out;
-	raw = g_malloc(EYES17_FETCH_CHUNK * 2);
-	for (ch = 0; ch <= EYES17_FETCH_CH_A2; ch++) {
-		got = 0;
-		while (got < count) {
-			n = count - got;
-			if (n > EYES17_FETCH_CHUNK)
-				n = EYES17_FETCH_CHUNK;
-			fetch[0] = ch;
-			eyes17_put_u16_le(fetch + 1, n);
-			eyes17_put_u16_le(fetch + 3, got);
-			ret = eyes17_write_cmd(serial, EYES17_HDR_ADC,
-				EYES17_SUB_GET_CAPTURE_CHANNEL, fetch, sizeof(fetch));
-			if (ret != SR_OK)
-				break;
-			if (serial_read_blocking(serial, raw, (size_t)n * 2,
-					EYES17_CAPTURE_TIMEOUT_MS) != (int)((size_t)n * 2)) {
-				ret = SR_ERR_TIMEOUT;
-				break;
-			}
-			ret = eyes17_read_ack(serial);
-			if (ret != SR_OK)
-				break;
-			for (i = 0; i < n; i++)
-				outs[ch][got + i] = eyes17_adc_to_volts(
-					eyes17_get_u16_le(raw + 2 * i), gain, (int)ch);
-			got += n;
-		}
-		if (ret != SR_OK)
-			break;
-	}
-	g_free(raw);
-	return ret;
+	return eyes17_fetch_streams(serial, count, gain, channels, outs,
+		G_N_ELEMENTS(channels), eyes17_adc_to_volts);
 }
 
 /*
@@ -699,59 +617,21 @@ static int eyes17_send_quad_bug_preamble(struct sr_serial_dev_inst *serial,
 
 /*
  * Pull all four buffered channels after a CAPTURE_FOUR conversion:
- * per-channel loop of GET_CAPTURE_CHANNEL fetches (fetch bytes 0-3),
- * each write_cmd + bulk read + ACK, decoded per channel with
- * eyes17_adc_to_volts(raw, gain, (int)ch) — the gain-row-0 rule for
- * A3/MIC lives inside the converter.
+ * fetch bytes 0-3 decoded per channel with eyes17_adc_to_volts —
+ * the gain-row-0 rule for A3/MIC lives inside the converter.
  */
 static int eyes17_fetch_quad_stream(struct sr_serial_dev_inst *serial,
 		uint16_t count, int gain, float *v1_out, float *v2_out,
 		float *v3_out, float *v4_out)
 {
-	uint8_t fetch[5];
-	uint8_t *raw;
-	float *outs[EYES17_NUM_CHANNELS];
-	uint8_t ch;
-	uint16_t got, n;
-	size_t i;
-	int ret = SR_OK;
+	static const uint8_t channels[] = {
+		EYES17_FETCH_CH_A1, EYES17_FETCH_CH_A2,
+		EYES17_FETCH_CH_A3, EYES17_FETCH_CH_MIC,
+	};
+	float *outs[] = { v1_out, v2_out, v3_out, v4_out };
 
-	outs[EYES17_FETCH_CH_A1] = v1_out;
-	outs[EYES17_FETCH_CH_A2] = v2_out;
-	outs[EYES17_FETCH_CH_A3] = v3_out;
-	outs[EYES17_FETCH_CH_MIC] = v4_out;
-	raw = g_malloc(EYES17_FETCH_CHUNK * 2);
-	for (ch = 0; ch < EYES17_NUM_CHANNELS; ch++) {
-		got = 0;
-		while (got < count) {
-			n = count - got;
-			if (n > EYES17_FETCH_CHUNK)
-				n = EYES17_FETCH_CHUNK;
-			fetch[0] = ch;
-			eyes17_put_u16_le(fetch + 1, n);
-			eyes17_put_u16_le(fetch + 3, got);
-			ret = eyes17_write_cmd(serial, EYES17_HDR_ADC,
-				EYES17_SUB_GET_CAPTURE_CHANNEL, fetch, sizeof(fetch));
-			if (ret != SR_OK)
-				break;
-			if (serial_read_blocking(serial, raw, (size_t)n * 2,
-					EYES17_CAPTURE_TIMEOUT_MS) != (int)((size_t)n * 2)) {
-				ret = SR_ERR_TIMEOUT;
-				break;
-			}
-			ret = eyes17_read_ack(serial);
-			if (ret != SR_OK)
-				break;
-			for (i = 0; i < n; i++)
-				outs[ch][got + i] = eyes17_adc_to_volts(
-					eyes17_get_u16_le(raw + 2 * i), gain, (int)ch);
-			got += n;
-		}
-		if (ret != SR_OK)
-			break;
-	}
-	g_free(raw);
-	return ret;
+	return eyes17_fetch_streams(serial, count, gain, channels, outs,
+		G_N_ELEMENTS(channels), eyes17_adc_to_volts);
 }
 
 /*

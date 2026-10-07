@@ -309,11 +309,45 @@ START_TEST(test_trigger_check_12)
 END_TEST
 
 /*
- * Link-only transport stubs. The eyes17 unit tests exercise pure functions
- * only; the serial helpers are hidden in the shared lib, so these
- * never-called definitions solely satisfy the tests/main link. They
- * return SR_ERR so any accidental call fails loudly.
+ * Scriptable mock transport (PRD §44). The eyes17 unit tests link
+ * against these serial helpers instead of the shared lib's; production
+ * code paths (ACK read, command send, version readline) run unmodified
+ * against a canned RX script while every TX byte lands in a log the
+ * test asserts on. serial is always NULL here and ignored, matching
+ * the old link-only stubs' contract.
  */
+#define EYES17_MOCK_RX_MAX 256
+#define EYES17_MOCK_TX_MAX 256
+static uint8_t mock_rx[EYES17_MOCK_RX_MAX];
+static size_t mock_rx_len;
+static size_t mock_rx_pos;
+static uint8_t mock_tx[EYES17_MOCK_TX_MAX];
+static size_t mock_tx_len;
+static char mock_line[128];
+static int mock_line_set;
+
+static void mock_reset(void)
+{
+	mock_rx_len = 0;
+	mock_rx_pos = 0;
+	mock_tx_len = 0;
+	mock_line_set = 0;
+}
+
+static void mock_rx_feed(const uint8_t *b, size_t n)
+{
+	if (n > sizeof(mock_rx) - mock_rx_len)
+		n = sizeof(mock_rx) - mock_rx_len;
+	memcpy(mock_rx + mock_rx_len, b, n);
+	mock_rx_len += n;
+}
+
+static void mock_readline_feed(const char *s)
+{
+	g_strlcpy(mock_line, s, sizeof(mock_line));
+	mock_line_set = 1;
+}
+
 int serial_write_blocking(struct sr_serial_dev_inst *serial,
 	const void *buf, size_t count, unsigned int timeout_ms);
 int serial_read_blocking(struct sr_serial_dev_inst *serial,
@@ -324,31 +358,47 @@ int serial_readline(struct sr_serial_dev_inst *serial,
 int serial_write_blocking(struct sr_serial_dev_inst *serial,
 	const void *buf, size_t count, unsigned int timeout_ms)
 {
+	size_t n;
 	(void)serial;
-	(void)buf;
-	(void)count;
 	(void)timeout_ms;
-	return SR_ERR;
+	n = count;
+	if (n > sizeof(mock_tx) - mock_tx_len)
+		n = sizeof(mock_tx) - mock_tx_len;
+	memcpy(mock_tx + mock_tx_len, buf, n);
+	mock_tx_len += n;
+	return (int)n;
 }
 
 int serial_read_blocking(struct sr_serial_dev_inst *serial,
 	void *buf, size_t count, unsigned int timeout_ms)
 {
+	size_t avail;
 	(void)serial;
-	(void)buf;
-	(void)count;
 	(void)timeout_ms;
-	return SR_ERR;
+	if (mock_rx_pos >= mock_rx_len)
+		return 0;
+	avail = mock_rx_len - mock_rx_pos;
+	if (count > avail)
+		count = avail;
+	memcpy(buf, mock_rx + mock_rx_pos, count);
+	mock_rx_pos += count;
+	return (int)count;
 }
 
 int serial_readline(struct sr_serial_dev_inst *serial,
 	char **buf, int *buflen, gint64 timeout_ms)
 {
+	size_t n;
 	(void)serial;
-	(void)buf;
-	(void)buflen;
 	(void)timeout_ms;
-	return SR_ERR;
+	if (!mock_line_set || !buf || !*buf || !buflen)
+		return SR_ERR;
+	n = strlen(mock_line);
+	if (n + 1 > (size_t)*buflen)
+		return SR_ERR;
+	memcpy(*buf, mock_line, n + 1);
+	*buflen = (int)n;
+	return SR_OK;
 }
 
 /*
@@ -834,6 +884,135 @@ START_TEST(test_check_digital)
 }
 END_TEST
 
+/*
+ * Mock-transport tests (PRD §44). Production protocol.c paths run
+ * against the canned mock above with serial NULL.
+ */
+START_TEST(test_ack_ok)
+{
+	static const uint8_t ok[] = { 0x01 };
+	mock_reset();
+	mock_rx_feed(ok, sizeof(ok));
+	ck_assert_int_eq(eyes17_read_ack(NULL), SR_OK);
+}
+END_TEST
+
+START_TEST(test_ack_mask)
+{
+	/* Golden §8: only the low two bits carry the ACK. */
+	static const uint8_t masked[] = { 0x05 };
+	mock_reset();
+	mock_rx_feed(masked, sizeof(masked));
+	ck_assert_int_eq(eyes17_read_ack(NULL), SR_OK);
+}
+END_TEST
+
+START_TEST(test_ack_bad)
+{
+	static const uint8_t bad0[] = { 0x00 };
+	static const uint8_t bad2[] = { 0x02 };
+	mock_reset();
+	mock_rx_feed(bad0, sizeof(bad0));
+	ck_assert_int_eq(eyes17_read_ack(NULL), SR_ERR_DATA);
+	mock_reset();
+	mock_rx_feed(bad2, sizeof(bad2));
+	ck_assert_int_eq(eyes17_read_ack(NULL), SR_ERR_DATA);
+}
+END_TEST
+
+START_TEST(test_ack_timeout)
+{
+	mock_reset();
+	ck_assert_int_eq(eyes17_read_ack(NULL), SR_ERR_TIMEOUT);
+}
+END_TEST
+
+START_TEST(test_ack_consumed)
+{
+	static const uint8_t one[] = { 0x01 };
+	mock_reset();
+	mock_rx_feed(one, sizeof(one));
+	ck_assert_int_eq(eyes17_read_ack(NULL), SR_OK);
+	ck_assert_int_eq(eyes17_read_ack(NULL), SR_ERR_TIMEOUT);
+}
+END_TEST
+
+START_TEST(test_send_cmd_bytes)
+{
+	static const uint8_t args[] = { 0x50, 0x00 };
+	static const uint8_t ack[] = { 0x01 };
+	static const uint8_t expect[] = { 2, 1, 0x50, 0x00 };
+	mock_reset();
+	mock_rx_feed(ack, sizeof(ack));
+	ck_assert_int_eq(eyes17_send_cmd(NULL, 2, 1, args,
+		sizeof(args)), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, sizeof(expect));
+	ck_assert_int_eq(memcmp(mock_tx, expect, sizeof(expect)), 0);
+}
+END_TEST
+
+START_TEST(test_send_cmd_bad_ack)
+{
+	static const uint8_t args[] = { 0x50, 0x00 };
+	static const uint8_t bad[] = { 0x00 };
+	static const uint8_t expect[] = { 2, 1, 0x50, 0x00 };
+	mock_reset();
+	mock_rx_feed(bad, sizeof(bad));
+	ck_assert_int_eq(eyes17_send_cmd(NULL, 2, 1, args,
+		sizeof(args)), SR_ERR_DATA);
+	ck_assert_uint_eq(mock_tx_len, sizeof(expect));
+	ck_assert_int_eq(memcmp(mock_tx, expect, sizeof(expect)), 0);
+}
+END_TEST
+
+START_TEST(test_send_cmd_no_ack)
+{
+	static const uint8_t args[] = { 0x50, 0x00 };
+	mock_reset();
+	ck_assert_int_eq(eyes17_send_cmd(NULL, 2, 1, args,
+		sizeof(args)), SR_ERR_TIMEOUT);
+}
+END_TEST
+
+START_TEST(test_send_cmd_oversize)
+{
+	static uint8_t big[63];
+	mock_reset();
+	memset(big, 0xa5, sizeof(big));
+	ck_assert_int_eq(eyes17_send_cmd(NULL, 2, 1, big,
+		sizeof(big)), SR_ERR_ARG);
+	ck_assert_uint_eq(mock_tx_len, 0);
+}
+END_TEST
+
+START_TEST(test_get_version_wire)
+{
+	struct eyes17_version v;
+	mock_reset();
+	mock_readline_feed("SJ-2.4");
+	ck_assert_int_eq(eyes17_get_version(NULL, &v), SR_OK);
+	ck_assert_int_eq(v.major, 2);
+	ck_assert_int_eq(v.minor, 4);
+}
+END_TEST
+
+START_TEST(test_get_version_reject_wire)
+{
+	struct eyes17_version v;
+	mock_reset();
+	mock_readline_feed("FOO-1.0");
+	ck_assert_int_eq(eyes17_get_version(NULL, &v), SR_ERR_DATA);
+}
+END_TEST
+
+START_TEST(test_get_version_noreply)
+{
+	struct eyes17_version v;
+	mock_reset();
+	ck_assert_int_eq(eyes17_get_version(NULL, &v), SR_ERR_TIMEOUT);
+}
+END_TEST
+
 Suite *suite_eyes17(void)
 {
 	Suite *s = suite_create("eyes17");
@@ -845,6 +1024,18 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tc, test_u32_roundtrip);
 	tcase_add_test(tc, test_version_ok);
 	tcase_add_test(tc, test_version_reject);
+	tcase_add_test(tc, test_ack_ok);
+	tcase_add_test(tc, test_ack_mask);
+	tcase_add_test(tc, test_ack_bad);
+	tcase_add_test(tc, test_ack_timeout);
+	tcase_add_test(tc, test_ack_consumed);
+	tcase_add_test(tc, test_send_cmd_bytes);
+	tcase_add_test(tc, test_send_cmd_bad_ack);
+	tcase_add_test(tc, test_send_cmd_no_ack);
+	tcase_add_test(tc, test_send_cmd_oversize);
+	tcase_add_test(tc, test_get_version_wire);
+	tcase_add_test(tc, test_get_version_reject_wire);
+	tcase_add_test(tc, test_get_version_noreply);
 	tcase_add_test(tt, test_timebase_floor);
 	tcase_add_test(tt, test_timebase_1_5us_rate);
 	tcase_add_test(tt, test_chosa_trigger_flag);

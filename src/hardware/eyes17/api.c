@@ -462,23 +462,25 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
             return ret;
         }
 
-        std_session_send_df_header(sdi);
+	std_session_send_df_header(sdi);
 
-        sr_analog_init(&analog, &encoding, &meaning, &spec,
-            EYES17_ANALOG_DIGITS);
-        analog.meaning->mq = SR_MQ_VOLTAGE;
-        analog.meaning->unit = SR_UNIT_VOLT;
-        analog.meaning->channels = sdi->channels;
-        analog.num_samples = count;
-        analog.data = volts;
-        packet.type = SR_DF_ANALOG;
-        packet.payload = &analog;
-        sr_session_send(sdi, &packet);
-        g_free(volts);
+	ach1 = g_slist_append(ach1, ch_a1);
+	sr_analog_init(&analog, &encoding, &meaning, &spec,
+		EYES17_ANALOG_DIGITS);
+	analog.meaning->mq = SR_MQ_VOLTAGE;
+	analog.meaning->unit = SR_UNIT_VOLT;
+	analog.meaning->channels = ach1;
+	analog.num_samples = count;
+	analog.data = volts;
+	packet.type = SR_DF_ANALOG;
+	packet.payload = &analog;
+	sr_session_send(sdi, &packet);
+	g_slist_free(ach1);
+	g_free(volts);
 
-        std_session_send_df_end(sdi);
+	std_session_send_df_end(sdi);
 
-        return SR_OK;
+	return SR_OK;
     }
 
     if (n_enabled == 2) {

@@ -1227,6 +1227,84 @@ START_TEST(test_sq_apply_reject)
 }
 END_TEST
 
+/*
+ * PV stimulus tests (M12 Task 3). Vectors replicate golden
+ * DAC.setVoltage/__setRawVoltage framing with the ideal code map.
+ */
+START_TEST(test_pv_check)
+{
+	ck_assert_int_eq(eyes17_pv_check(1, 5.0), SR_OK);
+	ck_assert_int_eq(eyes17_pv_check(1, -5.0), SR_OK);
+	ck_assert_int_eq(eyes17_pv_check(1, 0.0), SR_OK);
+	ck_assert_int_eq(eyes17_pv_check(2, 0.0), SR_OK);
+	ck_assert_int_eq(eyes17_pv_check(2, 3.3), SR_OK);
+	ck_assert_int_ne(eyes17_pv_check(1, 5.1), SR_OK);
+	ck_assert_int_ne(eyes17_pv_check(1, -5.1), SR_OK);
+	ck_assert_int_ne(eyes17_pv_check(2, -0.1), SR_OK);
+	ck_assert_int_ne(eyes17_pv_check(2, 3.4), SR_OK);
+	ck_assert_int_ne(eyes17_pv_check(3, 1.0), SR_OK);
+}
+END_TEST
+
+START_TEST(test_pv_code)
+{
+	uint16_t code = 0xffff;
+
+	ck_assert_int_eq(eyes17_pv_code(1, 5.0, &code), SR_OK);
+	ck_assert_uint_eq(code, 4095);
+	ck_assert_int_eq(eyes17_pv_code(1, -5.0, &code), SR_OK);
+	ck_assert_uint_eq(code, 0);
+	ck_assert_int_eq(eyes17_pv_code(1, 0.0, &code), SR_OK);
+	ck_assert_uint_eq(code, 2048);
+	ck_assert_int_eq(eyes17_pv_code(2, 3.3, &code), SR_OK);
+	ck_assert_uint_eq(code, 4095);
+	ck_assert_int_eq(eyes17_pv_code(2, 0.0, &code), SR_OK);
+	ck_assert_uint_eq(code, 2048);
+	ck_assert_int_ne(eyes17_pv_code(1, 6.0, &code), SR_OK);
+	ck_assert_int_ne(eyes17_pv_code(1, 0.0, NULL), SR_OK);
+}
+END_TEST
+
+START_TEST(test_pv_build)
+{
+	uint8_t buf[4];
+	uint8_t expect1[] = { 6, 1, 0xff, 0x0f };
+	uint8_t expect2[] = { 6, 1, 0xff, 0x8f };
+	uint8_t expect3[] = { 6, 1, 0x00, 0x80 };
+
+	ck_assert_uint_eq(eyes17_build_pv(buf, 1, 4095), sizeof(expect1));
+	ck_assert_int_eq(memcmp(buf, expect1, sizeof(expect1)), 0);
+	ck_assert_uint_eq(eyes17_build_pv(buf, 2, 4095), sizeof(expect2));
+	ck_assert_int_eq(memcmp(buf, expect2, sizeof(expect2)), 0);
+	ck_assert_uint_eq(eyes17_build_pv(buf, 2, 0), sizeof(expect3));
+	ck_assert_int_eq(memcmp(buf, expect3, sizeof(expect3)), 0);
+	ck_assert_uint_eq(eyes17_build_pv(buf, 1, 4096), 0);
+	ck_assert_uint_eq(eyes17_build_pv(buf, 3, 0), 0);
+	ck_assert_uint_eq(eyes17_build_pv(NULL, 1, 0), 0);
+}
+END_TEST
+
+START_TEST(test_pv_apply_wire)
+{
+	static const uint8_t ack[] = { 0x01 };
+	static const uint8_t expect1[] = { 6, 1, 0xff, 0x0f };
+	static const uint8_t expect2[] = { 6, 1, 0x00, 0x88 };
+	mock_reset();
+	mock_rx_feed(ack, sizeof(ack));
+	ck_assert_int_eq(eyes17_pv_apply(NULL, 1, 5.0), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, sizeof(expect1));
+	ck_assert_int_eq(memcmp(mock_tx, expect1, sizeof(expect1)), 0);
+	mock_reset();
+	mock_rx_feed(ack, sizeof(ack));
+	ck_assert_int_eq(eyes17_pv_apply(NULL, 2, 0.0), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, sizeof(expect2));
+	ck_assert_int_eq(memcmp(mock_tx, expect2, sizeof(expect2)), 0);
+	mock_reset();
+	ck_assert_int_ne(eyes17_pv_apply(NULL, 1, 6.0), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, 0);
+}
+END_TEST
+
 Suite *suite_eyes17(void)
 {
 	Suite *s = suite_create("eyes17");
@@ -1251,6 +1329,10 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tc, test_sq_build_park);
 	tcase_add_test(tc, test_sq_apply_wire);
 	tcase_add_test(tc, test_sq_apply_reject);
+	tcase_add_test(tc, test_pv_check);
+	tcase_add_test(tc, test_pv_code);
+	tcase_add_test(tc, test_pv_build);
+	tcase_add_test(tc, test_pv_apply_wire);
 	tcase_add_test(tc, test_ack_ok);
 	tcase_add_test(tc, test_ack_mask);
 	tcase_add_test(tc, test_ack_bad);

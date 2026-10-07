@@ -409,3 +409,58 @@ int eyes17_sq_apply(struct sr_serial_dev_inst *serial, int which,
 		return SR_ERR_ARG;
 	return eyes17_send_cmd(serial, buf[0], buf[1], buf + 2, n - 2);
 }
+
+int eyes17_pv_check(int which, double volts)
+{
+	if (which == 1)
+		return (volts >= -5.0 && volts <= 5.0) ? SR_OK : SR_ERR_ARG;
+	if (which == 2)
+		return (volts >= 0.0 && volts <= 3.3) ? SR_OK : SR_ERR_ARG;
+	return SR_ERR_ARG;
+}
+
+int eyes17_pv_code(int which, double volts, uint16_t *code_out)
+{
+	double span0, span1, code;
+
+	if (!code_out || eyes17_pv_check(which, volts) != SR_OK)
+		return SR_ERR_ARG;
+	if (which == 1) {
+		span0 = -5.0;
+		span1 = 5.0;
+	} else {
+		span0 = -3.3;
+		span1 = 3.3;
+	}
+	code = eyes17_py_round(4095.0 * (volts - span0) / (span1 - span0));
+	*code_out = (uint16_t)code;
+	return SR_OK;
+}
+
+size_t eyes17_build_pv(uint8_t *buf, int which, uint16_t code)
+{
+	uint16_t v;
+
+	if (!buf || (which != 1 && which != 2) || code > 4095)
+		return 0;
+	v = (which == 1) ? code : (uint16_t)(0x8000 | code);
+	buf[0] = EYES17_HDR_DAC;
+	buf[1] = EYES17_SUB_SET_DAC;
+	eyes17_put_u16_le(buf + 2, v);
+	return 4;
+}
+
+int eyes17_pv_apply(struct sr_serial_dev_inst *serial, int which,
+	double volts)
+{
+	uint8_t buf[4];
+	uint16_t code;
+	size_t n;
+
+	if (eyes17_pv_code(which, volts, &code) != SR_OK)
+		return SR_ERR_ARG;
+	n = eyes17_build_pv(buf, which, code);
+	if (n != 4)
+		return SR_ERR_ARG;
+	return eyes17_send_cmd(serial, buf[0], buf[1], buf + 2, n - 2);
+}

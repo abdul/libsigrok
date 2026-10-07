@@ -153,6 +153,13 @@
 #define EYES17_SQ_PARK_HIGH 0
 #define EYES17_SQ_PARK_LOW -1
 #define EYES17_SQ_SLOW_W_MAX 4294967295.0
+/* PV stimulus (M12 Task 3). Golden Peripherals.py:__setRawVoltage__:716:
+ * [DAC, SET_DAC, code u16le] + ACK, PV1 channel 3 span [-5,5] plain,
+ * PV2 channel 2 span [-3.3,3.3] with the 0x8000 flag. Code is the
+ * ideal 12-bit linear map (DAC calibration skipped, documented);
+ * out-of-span is rejected, never clamped silently. */
+#define EYES17_HDR_DAC 6
+#define EYES17_SUB_SET_DAC 1
 
 struct eyes17_version {
 	char raw[32];
@@ -191,6 +198,10 @@ struct dev_context {
 	double sq2_freq;
 	double sq2_duty;
 	gboolean sq2_touched;
+	double pv1_volts;
+	gboolean pv1_touched;
+	double pv2_volts;
+	gboolean pv2_touched;
 };
 
 SR_PRIV void eyes17_put_u16_le(uint8_t *p, uint16_t v);
@@ -219,6 +230,11 @@ SR_PRIV size_t eyes17_build_sq_slow(uint8_t *buf, double freq,
 SR_PRIV size_t eyes17_build_sq_park(uint8_t *buf, int which, int high);
 SR_PRIV int eyes17_sq_apply(struct sr_serial_dev_inst *serial, int which,
 	double freq, double duty);
+SR_PRIV int eyes17_pv_check(int which, double volts);
+SR_PRIV int eyes17_pv_code(int which, double volts, uint16_t *code_out);
+SR_PRIV size_t eyes17_build_pv(uint8_t *buf, int which, uint16_t code);
+SR_PRIV int eyes17_pv_apply(struct sr_serial_dev_inst *serial, int which,
+	double volts);
 SR_PRIV uint16_t eyes17_timebase_to_tb8(double timebase_us);
 SR_PRIV void eyes17_tb8_to_rate(uint16_t tb8, uint64_t *num, uint64_t *den);
 SR_PRIV uint16_t eyes17_clamp_count(size_t count);

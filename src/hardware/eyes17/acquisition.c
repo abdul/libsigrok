@@ -354,9 +354,9 @@ static int eyes17_fetch_single_12(struct sr_serial_dev_inst *serial,
  * Single-channel immediate capture (trigger-disabled path): send
  * CAPTURE_ONE for A1, wait for conversion, then pull the samples with
  * GET_CAPTURE_CHANNEL fetches and decode them to volts. Triggered
- * captures land in Plan 2 (M3); no trigger-setup command exists on
- * this path, so there is nothing to configure here beyond using the
- * immediate single-shot command.
+ * captures use eyes17_capture_triggered below; no trigger-setup
+ * command exists on this path, so there is nothing to configure
+ * here beyond using the immediate single-shot command.
  */
 int eyes17_capture_one(struct sr_serial_dev_inst *serial,
 		uint16_t tb8, uint16_t count, int gain, float *volts_out)

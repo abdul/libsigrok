@@ -33,7 +33,9 @@
 #define EYES17_HDR_ADC 2
 #define EYES17_SUB_CAPTURE_ONE 1
 #define EYES17_SUB_CAPTURE_TWO 2
-/* Hardware triggering (acquisition.c, M3). Golden eyes.py:configure_trigger:1182: [ADC, CONFIGURE_TRIGGER, (prescaler<<4)|(1<<chan), level u16le] + ACK. Single-channel A1 uses chan 0, prescaler 0 (8 ms hardware timeout). */
+/* Hardware triggering (acquisition.c). Golden eyes.py:configure_trigger:1182: */
+/* [ADC, CONFIGURE_TRIGGER, (prescaler<<4)|(1<<chan), level u16le] + ACK. */
+/* Single-channel A1 uses chan 0, prescaler 0 (8 ms hardware timeout). */
 #define EYES17_SUB_CONFIGURE_TRIGGER 5
 #define EYES17_TRIGGER_FRAME_LEN 5
  #define EYES17_TRIGGER_CHAN_A1 0
@@ -110,9 +112,8 @@
 #define EYES17_NUM_DIGITAL 8
 #define EYES17_DIGITAL_NAMES { "IN2", "SQR1_READ", "OD1_READ", "SEN", \
         "SQR1", "OD1", "SQ2", "SQ3" }
-/* Poll-based caps (driver-measured, NOT golden): single serial
- * round-trip ≈ 1-2 ms. Re-measure on the bench during Task 3 and
- * correct these with the measured numbers. */
+/* Poll-based caps (driver-measured, NOT golden): single serial */
+/* round-trip ≈ 1-2 ms. */
 #define EYES17_DIGITAL_MAX_SAMPLERATE 1000
 #define EYES17_DIGITAL_MAX_SAMPLES 4096
 
@@ -192,7 +193,9 @@ SR_PRIV int eyes17_capture_12bit_triggered(struct sr_serial_dev_inst *serial,
 		float *volts_out);
 SR_PRIV int eyes17_check_trigger(const char *source, const char *slope,
 		double level_volts, int gain, int resolution, uint16_t *level_out);
-SR_PRIV int eyes17_capture_triggered(struct sr_serial_dev_inst *serial, uint16_t tb8, uint16_t count, int gain, uint16_t level, float *volts_out);
+SR_PRIV int eyes17_capture_triggered(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, uint16_t level,
+		float *volts_out);
 SR_PRIV int eyes17_capture_two(struct sr_serial_dev_inst *serial,
 		uint16_t tb8, uint16_t count, int gain, float *a1_out,
 		float *a2_out);

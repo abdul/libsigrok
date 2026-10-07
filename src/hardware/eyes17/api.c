@@ -43,7 +43,7 @@ static const uint32_t devopts[] = {
 static const char *eyes17_trigger_sources[] = { "none", "A1" };
 static const char *eyes17_trigger_slopes[] = { "rising" };
 
-/* ADC resolution option: 10-bit now, 12-bit arrives with M6. */
+/* ADC resolution option: 10-bit or 12-bit. */
  static const char *eyes17_digits[] = { "10", "12" };
 
 /*
@@ -111,7 +111,8 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 	sdi->priv = devc;
 	devc->serial = serial;
 	sr_channel_new(sdi, 0, SR_CHANNEL_ANALOG, TRUE, "A1");
-	/* A2 joins disabled: default acquisitions stay single-channel (M2/M3 behavior byte-identical); enabling A2 selects dual. */
+	/* A2 joins disabled: default acquisitions stay single-channel; */
+	/* enabling A2 selects dual. */
 	sr_channel_new(sdi, 1, SR_CHANNEL_ANALOG, FALSE, "A2");
 	/* A3/MIC join disabled: quad is opt-in; single/dual defaults unchanged. */
 	sr_channel_new(sdi, 2, SR_CHANNEL_ANALOG, FALSE, "A3");
@@ -206,6 +207,8 @@ static int config_set(uint32_t key, GVariant *data,
 
 	switch (key) {
 	case SR_CONF_SAMPLERATE:
+		if (!g_variant_is_of_type(data, G_VARIANT_TYPE_UINT64))
+			return SR_ERR_ARG;
 		rates = eyes17_samplerate_list(&n);
 		if (std_u64_idx(data, rates, n) < 0) {
 			/*
@@ -219,8 +222,6 @@ static int config_set(uint32_t key, GVariant *data,
 			 */
 			uint64_t r;
 
-			if (!g_variant_is_of_type(data, G_VARIANT_TYPE_UINT64))
-				return SR_ERR_ARG;
 			r = g_variant_get_uint64(data);
 			if (r < 1 || r > EYES17_DIGITAL_MAX_SAMPLERATE)
 				return SR_ERR_ARG;
@@ -228,17 +229,23 @@ static int config_set(uint32_t key, GVariant *data,
 		devc->samplerate = g_variant_get_uint64(data);
 		break;
 	case SR_CONF_LIMIT_SAMPLES:
+		if (!g_variant_is_of_type(data, G_VARIANT_TYPE_UINT64))
+			return SR_ERR_ARG;
 		/* Clamp per the Task-4 convention; zero fails at start. */
 		devc->limit_samples =
 			eyes17_clamp_count((size_t)g_variant_get_uint64(data));
 		break;
 	case SR_CONF_RANGE:
+		if (!g_variant_is_of_type(data, G_VARIANT_TYPE_STRING))
+			return SR_ERR_ARG;
 		s = g_variant_get_string(data, NULL);
 		if (eyes17_range_to_gain(s, &gain) != SR_OK)
 			return SR_ERR_ARG;
 		devc->gain = gain;
 		break;
 	case SR_CONF_DIGITS:
+		if (!g_variant_is_of_type(data, G_VARIANT_TYPE_STRING))
+			return SR_ERR_ARG;
 		s = g_variant_get_string(data, NULL);
 		if (g_strcmp0(s, "10") == 0) {
 			devc->resolution = EYES17_RESOLUTION_10BIT;
@@ -249,16 +256,26 @@ static int config_set(uint32_t key, GVariant *data,
 		}
 		break;
 	case SR_CONF_TRIGGER_SOURCE:
+		if (!g_variant_is_of_type(data, G_VARIANT_TYPE_STRING))
+			return SR_ERR_ARG;
 		if (std_str_idx(data, ARRAY_AND_SIZE(eyes17_trigger_sources)) < 0)
 			return SR_ERR_ARG;
-		g_strlcpy(devc->trigger_source, g_variant_get_string(data, NULL), sizeof(devc->trigger_source));
+		g_strlcpy(devc->trigger_source,
+			g_variant_get_string(data, NULL),
+			sizeof(devc->trigger_source));
 		break;
 	case SR_CONF_TRIGGER_SLOPE:
+		if (!g_variant_is_of_type(data, G_VARIANT_TYPE_STRING))
+			return SR_ERR_ARG;
 		if (std_str_idx(data, ARRAY_AND_SIZE(eyes17_trigger_slopes)) < 0)
 			return SR_ERR_ARG;
-		g_strlcpy(devc->trigger_slope, g_variant_get_string(data, NULL), sizeof(devc->trigger_slope));
+		g_strlcpy(devc->trigger_slope,
+			g_variant_get_string(data, NULL),
+			sizeof(devc->trigger_slope));
 		break;
 	case SR_CONF_TRIGGER_LEVEL:
+		if (!g_variant_is_of_type(data, G_VARIANT_TYPE_DOUBLE))
+			return SR_ERR_ARG;
 		devc->trigger_level = g_variant_get_double(data);
 		break;
 	default:

@@ -212,8 +212,7 @@ static int config_set(uint32_t key, GVariant *data,
 		if (g_strcmp0(s, "10") == 0) {
 			devc->resolution = EYES17_RESOLUTION_10BIT;
 		} else if (g_strcmp0(s, "12") == 0) {
-			sr_err("12-bit capture not yet supported (M6).");
-			return SR_ERR;
+			devc->resolution = EYES17_RESOLUTION_12BIT;
 		} else {
 			return SR_ERR_ARG;
 		}
@@ -331,19 +330,29 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
         return ret;
 
     ret = eyes17_check_trigger(devc->trigger_source, devc->trigger_slope,
-        devc->trigger_level, devc->gain, &level);
+        devc->trigger_level, devc->gain, devc->resolution, &level);
     if (ret != SR_OK)
         return ret;
 
     if (n_enabled == 1) {
-        /* Unchanged M2/M3 single path. */
+        /* 12-bit multi already fails in eyes17_check_acquisition above;
+         * resolution 12 here is always the single-channel 12-bit wire. */
         volts = g_malloc(count * sizeof(*volts));
-        if (g_strcmp0(devc->trigger_source, "none") == 0)
-            ret = eyes17_capture_one(serial, tb8, count,
-                devc->gain, volts);
-        else
-            ret = eyes17_capture_triggered(serial, tb8, count,
-                devc->gain, level, volts);
+        if (g_strcmp0(devc->trigger_source, "none") == 0) {
+            if (devc->resolution == EYES17_RESOLUTION_12BIT)
+                ret = eyes17_capture_12bit(serial, tb8, count,
+                    devc->gain, volts);
+            else
+                ret = eyes17_capture_one(serial, tb8, count,
+                    devc->gain, volts);
+        } else {
+            if (devc->resolution == EYES17_RESOLUTION_12BIT)
+                ret = eyes17_capture_12bit_triggered(serial, tb8, count,
+                    devc->gain, level, volts);
+            else
+                ret = eyes17_capture_triggered(serial, tb8, count,
+                    devc->gain, level, volts);
+        }
         if (ret != SR_OK) {
             g_free(volts);
             return ret;

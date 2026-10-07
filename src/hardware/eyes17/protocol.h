@@ -168,7 +168,15 @@ SR_PRIV gboolean eyes17_gain_is_valid(int gain);
 SR_PRIV float eyes17_adc_to_volts_ideal(uint16_t raw, int gain, int ch);
 SR_PRIV gboolean eyes17_calibration_is_ready(void);
 SR_PRIV gboolean eyes17_calibration_load(const uint8_t *flash, size_t len);
-SR_PRIV int eyes17_check_trigger(const char *source, const char *slope, double level_volts, int gain, uint16_t *level_out);
+SR_PRIV size_t eyes17_build_capture_12bit(uint8_t *buf, uint16_t tb8,
+		uint16_t count);
+SR_PRIV int eyes17_capture_12bit(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, float *volts_out);
+SR_PRIV int eyes17_capture_12bit_triggered(struct sr_serial_dev_inst *serial,
+		uint16_t tb8, uint16_t count, int gain, uint16_t level,
+		float *volts_out);
+SR_PRIV int eyes17_check_trigger(const char *source, const char *slope,
+		double level_volts, int gain, int resolution, uint16_t *level_out);
 SR_PRIV int eyes17_capture_triggered(struct sr_serial_dev_inst *serial, uint16_t tb8, uint16_t count, int gain, uint16_t level, float *volts_out);
 SR_PRIV int eyes17_capture_two(struct sr_serial_dev_inst *serial,
 		uint16_t tb8, uint16_t count, int gain, float *a1_out,

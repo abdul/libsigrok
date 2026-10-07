@@ -255,21 +255,56 @@ START_TEST(test_trigger_check)
 {
 	uint16_t level = 0;
 
-	ck_assert_int_eq(eyes17_check_trigger("A1", "rising", 1.1, 0,
+	ck_assert_int_eq(eyes17_check_trigger("A1", "rising", 1.1, 0, 10,
 		&level), SR_OK);
 	ck_assert_uint_eq(level, 477);
-	ck_assert_int_eq(eyes17_check_trigger("none", "rising", 0.0, 0,
+	ck_assert_int_eq(eyes17_check_trigger("none", "rising", 0.0, 0, 10,
 		&level), SR_OK);
-	ck_assert_int_ne(eyes17_check_trigger("A2", "rising", 1.1, 0,
+	ck_assert_int_ne(eyes17_check_trigger("A2", "rising", 1.1, 0, 10,
 		&level), SR_OK);
-	ck_assert_int_ne(eyes17_check_trigger("A1", "falling", 1.1, 0,
+	ck_assert_int_ne(eyes17_check_trigger("A1", "falling", 1.1, 0, 10,
 		&level), SR_OK);
-	ck_assert_int_ne(eyes17_check_trigger("A1", "rising", 20.0, 0,
+	ck_assert_int_ne(eyes17_check_trigger("A1", "rising", 20.0, 0, 10,
 		&level), SR_OK);
-	ck_assert_int_ne(eyes17_check_trigger(NULL, "rising", 0.0, 0,
+	ck_assert_int_ne(eyes17_check_trigger(NULL, "rising", 0.0, 0, 10,
 		&level), SR_OK);
-	ck_assert_int_ne(eyes17_check_trigger("A1", "rising", 1.1, 0,
+	ck_assert_int_ne(eyes17_check_trigger("A1", "rising", 1.1, 0, 10,
 		NULL), SR_OK);
+	ck_assert_int_ne(eyes17_check_trigger("A1", "rising", 1.1, 0, 8,
+		&level), SR_OK);
+}
+END_TEST
+
+/*
+ * Golden eyes.py:capture_highres_traces: [ADC=2, CAPTURE_12BIT=13,
+ * CHOSA=3] + count u16le + tb8 u16le. count=100, tb8=80.
+ */
+START_TEST(test_capture_12bit_frame)
+{
+	uint8_t buf[EYES17_CAPTURE_FRAME_LEN];
+	uint8_t expect[] = { 2, 13, 0x03, 0x64, 0x00, 0x50, 0x00 };
+
+	ck_assert_uint_eq(eyes17_build_capture_12bit(buf, 80, 100),
+		sizeof(expect));
+	ck_assert_int_eq(memcmp(buf, expect, sizeof(expect)), 0);
+}
+END_TEST
+
+/*
+ * Resolution-aware trigger check: 12-bit level-1.1/gain-0 encodes 1911
+ * (4095 scale); 10-bit encodes 477. Out-of-range 12-bit fails.
+ */
+START_TEST(test_trigger_check_12)
+{
+	uint16_t level = 0;
+
+	ck_assert_int_eq(eyes17_check_trigger("A1", "rising", 1.1, 0, 12,
+		&level), SR_OK);
+	ck_assert_uint_eq(level, 1911);
+	ck_assert_int_eq(eyes17_check_trigger("none", "rising", 0.0, 0, 12,
+		&level), SR_OK);
+	ck_assert_int_ne(eyes17_check_trigger("A1", "rising", 20.0, 0, 12,
+		&level), SR_OK);
 }
 END_TEST
 
@@ -787,6 +822,8 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tt, test_timebase_1_5us_rate);
 	tcase_add_test(tt, test_chosa_trigger_flag);
 	tcase_add_test(tt, test_trigger_check);
+	tcase_add_test(tt, test_capture_12bit_frame);
+	tcase_add_test(tt, test_trigger_check_12);
 	tcase_add_test(tt, test_timebase_10us);
 	tcase_add_test(tt, test_count_cap);
 	tcase_add_test(tt, test_capture_one_frame);

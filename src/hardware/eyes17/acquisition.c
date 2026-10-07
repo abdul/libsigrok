@@ -908,3 +908,34 @@ uint8_t eyes17_pack_logic_sample(uint8_t status, uint8_t mask)
 	}
 	return out;
 }
+
+/*
+ * Polled logic block: count status polls at interval_ms apart
+ * (g_usleep between polls, none after the last), each packed
+ * through mask into samples_out. Any poll failure aborts with
+ * its code (partial data discarded by the caller). Total wall
+ * bounded by count x (interval + timeout); the Task-1 caps
+ * (<= 1000 Hz, <= 4096 samples) keep it <= ~5 s worst case.
+ */
+int eyes17_capture_logic(struct sr_serial_dev_inst *serial,
+	uint16_t interval_ms, uint16_t count, uint8_t mask,
+	uint8_t *samples_out)
+{
+	uint16_t i;
+	uint8_t state;
+	int ret;
+
+	if (!serial || !samples_out)
+		return SR_ERR_ARG;
+	if (count == 0)
+		return SR_ERR_ARG;
+	for (i = 0; i < count; i++) {
+		ret = eyes17_poll_states(serial, &state);
+		if (ret != SR_OK)
+			return ret;
+		samples_out[i] = eyes17_pack_logic_sample(state, mask);
+		if (i + 1 < count && interval_ms > 0)
+			g_usleep((gulong)interval_ms * 1000UL);
+	}
+	return SR_OK;
+}

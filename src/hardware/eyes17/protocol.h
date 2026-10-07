@@ -227,5 +227,12 @@ SR_PRIV int eyes17_poll_states(struct sr_serial_dev_inst *serial,
 SR_PRIV int eyes17_check_digital(uint64_t samplerate, uint64_t limit,
         uint16_t *interval_ms_out, uint16_t *count_out);
 SR_PRIV uint8_t eyes17_pack_logic_sample(uint8_t status, uint8_t mask);
+/* Polled logic block (M7 Task 2): count polls at interval_ms apart
+ * (g_usleep between polls, none after the last), each packed through
+ * mask into samples_out. Any poll failure aborts with its code.
+ * Wall bounded by count x (interval + timeout), caps keep it <= ~5 s. */
+SR_PRIV int eyes17_capture_logic(struct sr_serial_dev_inst *serial,
+        uint16_t interval_ms, uint16_t count, uint8_t mask,
+        uint8_t *samples_out);
 
 #endif

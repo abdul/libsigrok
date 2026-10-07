@@ -116,6 +116,21 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 	/* A3/MIC join disabled: quad is opt-in; single/dual defaults unchanged. */
 	sr_channel_new(sdi, 2, SR_CHANNEL_ANALOG, FALSE, "A3");
 	sr_channel_new(sdi, 3, SR_CHANNEL_ANALOG, FALSE, "MIC");
+	/*
+	 * Logic channels restart indexes at 0 per type (rigol-ds /
+	 * hameg-hmo precedent for mixed analog+logic scopes: their
+	 * digital channels restart at index 0 rather than continuing
+	 * past the analog ones). Disabled by default so analog
+	 * acquisitions stay byte-identical. Names are the PRD §27
+	 * digital_inputs order, matching GET_STATES bit N.
+	 */
+	{
+		static const char *names[] = EYES17_DIGITAL_NAMES;
+		int i;
+
+		for (i = 0; i < EYES17_NUM_DIGITAL; i++)
+			sr_channel_new(sdi, i, SR_CHANNEL_LOGIC, FALSE, names[i]);
+	}
 
 	return std_scan_complete(driver, g_slist_append(NULL, sdi));
 }
@@ -192,8 +207,24 @@ static int config_set(uint32_t key, GVariant *data,
 	switch (key) {
 	case SR_CONF_SAMPLERATE:
 		rates = eyes17_samplerate_list(&n);
-		if (std_u64_idx(data, rates, n) < 0)
-			return SR_ERR_ARG;
+		if (std_u64_idx(data, rates, n) < 0) {
+			/*
+			 * Off-ladder rate: accept any 1..1000 Hz integer
+			 * for logic-only polling (M7 Task 2). The ladder
+			 * list is unchanged; validation happens at start
+			 * (eyes17_check_digital for logic-only,
+			 * eyes17_check_acquisition still rejects
+			 * off-ladder rates for analog). No dedicated
+			 * option unless the list/review asks for one.
+			 */
+			uint64_t r;
+
+			if (!g_variant_is_of_type(data, G_VARIANT_TYPE_UINT64))
+				return SR_ERR_ARG;
+			r = g_variant_get_uint64(data);
+			if (r < 1 || r > EYES17_DIGITAL_MAX_SAMPLERATE)
+				return SR_ERR_ARG;
+		}
 		devc->samplerate = g_variant_get_uint64(data);
 		break;
 	case SR_CONF_LIMIT_SAMPLES:
@@ -289,11 +320,17 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
     struct sr_channel *ch;
     struct sr_channel *ch_a1 = NULL, *ch_a2 = NULL, *ch_a3 = NULL, *ch_mic = NULL;
     GSList *ach1 = NULL, *ach2 = NULL;
+    GSList *logic_ch = NULL;
+    struct sr_datafeed_logic logic;
     int n_enabled = 0, a2_enabled = 0;
     int have_a1 = 0, have_a2 = 0, have_a3 = 0, have_mic = 0;
+    int n_logic = 0;
+    uint8_t logic_mask = 0;
     uint16_t tb8, count;
     uint16_t level;
+    uint16_t dig_interval, dig_count;
     float *volts, *volts2;
+    uint8_t *samples;
     int ret;
 
     if (!sdi || !sdi->priv || !sdi->conn)
@@ -314,6 +351,56 @@ static int dev_acquisition_start(const struct sr_dev_inst *sdi)
             ch_a3 = ch, have_a3 = 1;
         else if (ch->index == 3)
             ch_mic = ch, have_mic = 1;
+    }
+    /* Enabled logic channels (indexes restart at 0 per type; bit N
+     * of the mask is GET_STATES bit N in PRD order). */
+    for (l = sdi->channels; l; l = l->next) {
+        ch = l->data;
+        if (ch->type != SR_CHANNEL_LOGIC || !ch->enabled)
+            continue;
+        if (ch->index < 0 || ch->index >= EYES17_NUM_DIGITAL)
+            return SR_ERR_ARG;
+        logic_mask |= (uint8_t)(1u << ch->index);
+        logic_ch = g_slist_append(logic_ch, ch);
+        n_logic++;
+    }
+    if (n_logic > 0) {
+        if (n_enabled > 0) {
+            /* No mixed wire path: poll timestamps could not align
+             * with ADC frames. */
+            g_slist_free(logic_ch);
+            sr_err("Mixed analog+logic acquisition is not supported; enable only logic channels.");
+            return SR_ERR_ARG;
+        }
+        /* Logic-only: samplerate carries the poll rate (any 1..1000
+         * Hz integer; ladder list unchanged). One SR_DF_LOGIC
+         * packet (fx2lafw la_send_data_proc idiom: unitsize 1,
+         * dense LSB-first bytes), header/data/end. */
+        ret = eyes17_check_digital(devc->samplerate, devc->limit_samples,
+            &dig_interval, &dig_count);
+        if (ret != SR_OK) {
+            g_slist_free(logic_ch);
+            return ret;
+        }
+        samples = g_malloc(dig_count * sizeof(*samples));
+        ret = eyes17_capture_logic(serial, dig_interval, dig_count,
+            logic_mask, samples);
+        if (ret != SR_OK) {
+            g_slist_free(logic_ch);
+            g_free(samples);
+            return ret;
+        }
+        std_session_send_df_header(sdi);
+        logic.unitsize = 1;
+        logic.length = dig_count;
+        logic.data = samples;
+        packet.type = SR_DF_LOGIC;
+        packet.payload = &logic;
+        sr_session_send(sdi, &packet);
+        g_slist_free(logic_ch);
+        g_free(samples);
+        std_session_send_df_end(sdi);
+        return SR_OK;
     }
     if (n_enabled != 1 && n_enabled != 2 && n_enabled != 4)
         return SR_ERR_ARG; /* No golden wire path (notably 3-channel). */

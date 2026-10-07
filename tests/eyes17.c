@@ -1013,6 +1013,112 @@ START_TEST(test_get_version_noreply)
 }
 END_TEST
 
+/*
+ * WG stimulus tests (M12 Task 1). Frame vectors replicate the golden
+ * set_wave math byte-for-byte, incl. Python banker's rounding.
+ */
+START_TEST(test_py_round)
+{
+	ck_assert_double_eq(eyes17_py_round(62.5), 62.0);
+	ck_assert_double_eq(eyes17_py_round(63.5), 64.0);
+	ck_assert_double_eq(eyes17_py_round(2.5), 2.0);
+	ck_assert_double_eq(eyes17_py_round(3.5), 4.0);
+	ck_assert_double_eq(eyes17_py_round(-2.5), -2.0);
+	ck_assert_double_eq(eyes17_py_round(124.5), 124.0);
+	ck_assert_double_eq(eyes17_py_round(125.0), 125.0);
+}
+END_TEST
+
+START_TEST(test_wg_check)
+{
+	ck_assert_int_eq(eyes17_wg_check("sine", 1000.0, 1.0), SR_OK);
+	ck_assert_int_eq(eyes17_wg_check("off", 0.0, 1.0), SR_OK);
+	ck_assert_int_eq(eyes17_wg_check("sine", 0.05, 1.0), SR_OK);
+	ck_assert_int_eq(eyes17_wg_check("sine", 0.1, 1.0), SR_OK);
+	ck_assert_int_eq(eyes17_wg_check("sine", 1099.9, 1.0), SR_OK);
+	ck_assert_int_eq(eyes17_wg_check("sine", 1100.0, 1.0), SR_OK);
+	ck_assert_int_eq(eyes17_wg_check("sine", 2000000.0, 1.0), SR_OK);
+	ck_assert_int_ne(eyes17_wg_check("tria", 1000.0, 1.0), SR_OK);
+	ck_assert_int_ne(eyes17_wg_check(NULL, 1000.0, 1.0), SR_OK);
+	ck_assert_int_ne(eyes17_wg_check("sine", -1.0, 1.0), SR_OK);
+	ck_assert_int_ne(eyes17_wg_check("sine", 2000000.1, 1.0), SR_OK);
+	ck_assert_int_ne(eyes17_wg_check("sine", 1000.0, 0.0), SR_OK);
+	ck_assert_int_ne(eyes17_wg_check("sine", 1000.0, -1.0), SR_OK);
+}
+END_TEST
+
+START_TEST(test_wg_amp_step)
+{
+	int step = -1;
+
+	ck_assert_int_eq(eyes17_wg_amp_step(0.1, &step), SR_OK);
+	ck_assert_int_eq(step, 0);
+	ck_assert_int_eq(eyes17_wg_amp_step(0.5, &step), SR_OK);
+	ck_assert_int_eq(step, 0);
+	ck_assert_int_eq(eyes17_wg_amp_step(0.6, &step), SR_OK);
+	ck_assert_int_eq(step, 1);
+	ck_assert_int_eq(eyes17_wg_amp_step(2.0, &step), SR_OK);
+	ck_assert_int_eq(step, 1);
+	ck_assert_int_eq(eyes17_wg_amp_step(2.2, &step), SR_OK);
+	ck_assert_int_eq(step, 2);
+	ck_assert_int_eq(eyes17_wg_amp_step(5.0, &step), SR_OK);
+	ck_assert_int_eq(step, 2);
+	ck_assert_int_ne(eyes17_wg_amp_step(0.0, &step), SR_OK);
+	ck_assert_int_ne(eyes17_wg_amp_step(1.0, NULL), SR_OK);
+}
+END_TEST
+
+START_TEST(test_wg_build)
+{
+	uint8_t buf[EYES17_WG_FRAME_LEN];
+	uint8_t expect1k[] = { 7, 13, 1, 124, 0 };
+	uint8_t expect1M[] = { 7, 13, 0, 1, 0 };
+	uint8_t expectoff[] = { 7, 13, 0x80, 0, 0 };
+
+	ck_assert_uint_eq(eyes17_build_wg(buf, 1000.0), sizeof(expect1k));
+	ck_assert_int_eq(memcmp(buf, expect1k, sizeof(expect1k)), 0);
+	ck_assert_uint_eq(eyes17_build_wg(buf, 1000000.0), sizeof(expect1M));
+	ck_assert_int_eq(memcmp(buf, expect1M, sizeof(expect1M)), 0);
+	ck_assert_uint_eq(eyes17_build_wg(buf, 0.0), sizeof(expectoff));
+	ck_assert_int_eq(memcmp(buf, expectoff, sizeof(expectoff)), 0);
+	ck_assert_uint_eq(eyes17_build_wg(buf, 10000000.0), 0);
+	ck_assert_uint_eq(eyes17_build_wg(NULL, 1000.0), 0);
+}
+END_TEST
+
+START_TEST(test_wg_apply_wire)
+{
+	static const uint8_t ack[] = { 0x01 };
+	static const uint8_t expect[] = { 7, 13, 1, 124, 0, 7, 16, 1 };
+	mock_reset();
+	mock_rx_feed(ack, sizeof(ack));
+	mock_rx_feed(ack, sizeof(ack));
+	ck_assert_int_eq(eyes17_wg_apply(NULL, "sine", 1000.0, 1.0), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, sizeof(expect));
+	ck_assert_int_eq(memcmp(mock_tx, expect, sizeof(expect)), 0);
+}
+END_TEST
+
+START_TEST(test_wg_apply_off)
+{
+	static const uint8_t ack[] = { 0x01 };
+	static const uint8_t expect[] = { 7, 13, 0x80, 0, 0 };
+	mock_reset();
+	mock_rx_feed(ack, sizeof(ack));
+	ck_assert_int_eq(eyes17_wg_apply(NULL, "off", 0.0, 1.0), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, sizeof(expect));
+	ck_assert_int_eq(memcmp(mock_tx, expect, sizeof(expect)), 0);
+}
+END_TEST
+
+START_TEST(test_wg_apply_reject)
+{
+	mock_reset();
+	ck_assert_int_ne(eyes17_wg_apply(NULL, "tria", 1000.0, 1.0), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, 0);
+}
+END_TEST
+
 Suite *suite_eyes17(void)
 {
 	Suite *s = suite_create("eyes17");
@@ -1024,6 +1130,13 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tc, test_u32_roundtrip);
 	tcase_add_test(tc, test_version_ok);
 	tcase_add_test(tc, test_version_reject);
+	tcase_add_test(tc, test_py_round);
+	tcase_add_test(tc, test_wg_check);
+	tcase_add_test(tc, test_wg_amp_step);
+	tcase_add_test(tc, test_wg_build);
+	tcase_add_test(tc, test_wg_apply_wire);
+	tcase_add_test(tc, test_wg_apply_off);
+	tcase_add_test(tc, test_wg_apply_reject);
 	tcase_add_test(tc, test_ack_ok);
 	tcase_add_test(tc, test_ack_mask);
 	tcase_add_test(tc, test_ack_bad);

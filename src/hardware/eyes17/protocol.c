@@ -18,6 +18,7 @@
  */
 
 #include <config.h>
+#include <math.h>
 #include <string.h>
 #include "protocol.h"
 
@@ -170,4 +171,118 @@ int eyes17_configure_trigger(struct sr_serial_dev_inst *serial, uint16_t level)
 	eyes17_put_u16_le(args + 1, level);
 	return eyes17_send_cmd(serial, EYES17_HDR_ADC,
 		EYES17_SUB_CONFIGURE_TRIGGER, args, sizeof(args));
+}
+/*
+ * Python round-half-even, matching the golden int(round(...)) prescaler
+ * math (C round() rounds half away from zero and would pick different
+ * prescalers/wavelengths on .5 fractions).
+ */
+double eyes17_py_round(double v)
+{
+	double a, f, d, r;
+
+	a = fabs(v);
+	f = floor(a);
+	d = a - f;
+	if (d < 0.5)
+		r = f;
+	else if (d > 0.5)
+		r = f + 1.0;
+	else
+		r = (fmod(f, 2.0) == 0.0) ? f : f + 1.0;
+	return (v < 0.0) ? -r : r;
+}
+
+int eyes17_wg_check(const char *wave, double freq, double amp)
+{
+	int step;
+
+	if (!wave)
+		return SR_ERR_ARG;
+	if (g_strcmp0(wave, "off") != 0 && g_strcmp0(wave, "sine") != 0)
+		return SR_ERR_ARG;
+	if (freq < 0.0 || freq > EYES17_WG_MAX_HZ)
+		return SR_ERR_ARG;
+	if (amp <= 0.0)
+		return SR_ERR_ARG;
+	if (eyes17_wg_amp_step(amp, &step) != SR_OK)
+		return SR_ERR_ARG;
+	return SR_OK;
+}
+
+int eyes17_wg_amp_step(double volts, int *step_out)
+{
+	static const double steps[] = EYES17_WG_AMP_STEPS;
+
+	if (!step_out || volts <= 0.0)
+		return SR_ERR_ARG;
+	if (volts < (steps[0] + steps[1]) / 2.0)
+		*step_out = 0;
+	else if (volts < (steps[1] + steps[2]) / 2.0)
+		*step_out = 1;
+	else
+		*step_out = 2;
+	return SR_OK;
+}
+
+size_t eyes17_build_wg(uint8_t *buf, double freq)
+{
+	static const double pres[] = { 1.0, 8.0, 64.0, 256.0 };
+	double table, wavelength;
+	int prescaler;
+
+	if (!buf)
+		return 0;
+	buf[0] = EYES17_HDR_WAVEGEN;
+	buf[1] = EYES17_SUB_SET_SINE1;
+	if (freq < EYES17_WG_MIN_HZ) {
+		buf[2] = EYES17_WG_OFF_BYTE;
+		buf[3] = 0;
+		buf[4] = 0;
+		return EYES17_WG_FRAME_LEN;
+	}
+	table = (freq < EYES17_WG_TABLE_SWITCH_HZ) ?
+		(double)EYES17_WG_TABLE_HIRES : (double)EYES17_WG_TABLE_LORES;
+	prescaler = 0;
+	wavelength = 0.0;
+	while (prescaler <= 3) {
+		wavelength = eyes17_py_round(
+			64000000.0 / freq / pres[prescaler] / table);
+		if (wavelength < 65525.0)
+			break;
+		prescaler++;
+	}
+	if (prescaler == 4 || wavelength < 1.0)
+		return 0;
+	buf[2] = (uint8_t)(((table == (double)EYES17_WG_TABLE_HIRES) ? 1 : 0) |
+		(prescaler << 1));
+	eyes17_put_u16_le(buf + 3, (uint16_t)wavelength - 1);
+	return EYES17_WG_FRAME_LEN;
+}
+
+int eyes17_wg_apply(struct sr_serial_dev_inst *serial,
+	const char *wave, double freq, double amp)
+{
+	uint8_t buf[EYES17_WG_FRAME_LEN];
+	uint8_t ab;
+	size_t n;
+	int step, ret;
+
+	if (eyes17_wg_check(wave, freq, amp) != SR_OK)
+		return SR_ERR_ARG;
+	if (g_strcmp0(wave, "off") == 0)
+		freq = 0.0;
+	n = eyes17_build_wg(buf, freq);
+	if (n != EYES17_WG_FRAME_LEN)
+		return SR_ERR_ARG;
+	ret = eyes17_send_cmd(serial, buf[0], buf[1], buf + 2, n - 2);
+	if (ret != SR_OK)
+		return ret;
+	if (g_strcmp0(wave, "off") == 0)
+		return SR_OK;
+	if (eyes17_wg_amp_step(amp, &step) != SR_OK)
+		return SR_ERR_ARG;
+	ab = (uint8_t)step;
+	return eyes17_send_cmd(serial, EYES17_HDR_WAVEGEN,
+		EYES17_SUB_SET_SINE_AMP, &ab, sizeof(ab));
 }

@@ -46,12 +46,40 @@ static const char *eyes17_trigger_slopes[] = { "rising" };
 /* ADC resolution option: 10-bit or 12-bit. */
  static const char *eyes17_digits[] = { "10", "12" };
 
+/* WG stimulus (M12 Task 1): output channel group "WG" carrying the
+ * waveform select, output frequency and amplitude. Tria needs table
+ * upload and stays out (own task). */
+static const char *eyes17_wg_waves[] = { "off", "sine" };
+static const uint32_t wg_opts[] = {
+	SR_CONF_PATTERN_MODE | SR_CONF_GET | SR_CONF_SET | SR_CONF_LIST,
+	SR_CONF_OUTPUT_FREQUENCY | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_AMPLITUDE | SR_CONF_GET | SR_CONF_SET,
+};
+
+static gboolean eyes17_is_wg_cg(const struct sr_channel_group *cg)
+{
+	return cg && cg->name && g_strcmp0(cg->name, "WG") == 0;
+}
+
+/* Port open test for send-if-open stimulus: the libserialport handle
+ * is NULL while closed (freed + cleared on close). */
+static gboolean eyes17_port_open(const struct dev_context *devc)
+{
+#ifdef HAVE_LIBSERIALPORT
+	return devc && devc->serial && devc->serial->sp_data;
+#else
+	(void)devc;
+	return FALSE;
+#endif
+}
+
 /*
  * All of scan/config_get/config_set/config_list/dev_open/dev_close/
  * dev_acquisition_start/dev_acquisition_stop must be non-NULL: this tree's
  * src/backend.c sanity_check_all_drivers() aborts sr_init() for the whole
  * library otherwise. scan probes the given conn for an ExpEYES17 firmware
- * string; dev_open/dev_close are the standard serial helpers.
+ * string; dev_open wraps the standard serial helper to apply stored
+ * stimulus (M12); dev_close is the standard helper.
  * config_channel_set/config_commit are genuinely optional and stay NULL.
  */
 static GSList *scan(struct sr_dev_driver *driver, GSList *options)
@@ -93,6 +121,13 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 	g_strlcpy(devc->trigger_source, "none", sizeof(devc->trigger_source));
 	g_strlcpy(devc->trigger_slope, "rising", sizeof(devc->trigger_slope));
 	devc->trigger_level = 0.0;
+	/* Stimulus defaults are never sent until the user sets them:
+	 * firmware boot state is left untouched (acquisition behavior
+	 * stays byte-identical to M1..M11). */
+	g_strlcpy(devc->wg_wave, "off", sizeof(devc->wg_wave));
+	devc->wg_freq = 0.0;
+	devc->wg_amp = 1.0;
+	devc->wg_touched = FALSE;
 	if (eyes17_get_version(serial, &devc->fw) != SR_OK) {
 		g_free(devc);
 		serial_close(serial);
@@ -132,8 +167,34 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 		for (i = 0; i < EYES17_NUM_DIGITAL; i++)
 			sr_channel_new(sdi, i, SR_CHANNEL_LOGIC, FALSE, names[i]);
 	}
+	/*
+	 * Output channel groups carry stimulus options (M12). They hold
+	 * no channels: pure option carriers à la scpi-pps groups, without
+	 * touching the scope channel topology.
+	 */
+	sr_channel_group_new(sdi, "WG", NULL);
 
 	return std_scan_complete(driver, g_slist_append(NULL, sdi));
+}
+
+static int config_get_wg(uint32_t key, GVariant **data,
+	const struct dev_context *devc)
+{
+	switch (key) {
+	case SR_CONF_PATTERN_MODE:
+		*data = g_variant_new_string(devc->wg_wave);
+		break;
+	case SR_CONF_OUTPUT_FREQUENCY:
+		*data = g_variant_new_double(devc->wg_freq);
+		break;
+	case SR_CONF_AMPLITUDE:
+		*data = g_variant_new_double(devc->wg_amp);
+		break;
+	default:
+		return SR_ERR_NA;
+	}
+
+	return SR_OK;
 }
 
 static int config_get(uint32_t key, GVariant **data,
@@ -142,13 +203,16 @@ static int config_get(uint32_t key, GVariant **data,
 	struct dev_context *devc;
 	const char *text;
 
-	(void)cg;
-
 	if (!sdi || !data)
 		return SR_ERR_ARG;
 	devc = sdi->priv;
 	if (!devc)
 		return SR_ERR_ARG;
+	if (cg) {
+		if (eyes17_is_wg_cg(cg))
+			return config_get_wg(key, data, devc);
+		return SR_ERR_NA;
+	}
 
 	switch (key) {
 	case SR_CONF_SAMPLERATE:
@@ -188,6 +252,49 @@ static int config_get(uint32_t key, GVariant **data,
 	return SR_OK;
 }
 
+static int config_set_wg(struct dev_context *devc, uint32_t key,
+	GVariant *data)
+{
+	char wave[8];
+	double freq, amp;
+	const char *s;
+
+	g_strlcpy(wave, devc->wg_wave, sizeof(wave));
+	freq = devc->wg_freq;
+	amp = devc->wg_amp;
+	switch (key) {
+	case SR_CONF_PATTERN_MODE:
+		if (!g_variant_is_of_type(data, G_VARIANT_TYPE_STRING))
+			return SR_ERR_ARG;
+		s = g_variant_get_string(data, NULL);
+		if (std_str_idx(data, ARRAY_AND_SIZE(eyes17_wg_waves)) < 0)
+			return SR_ERR_ARG;
+		g_strlcpy(wave, s, sizeof(wave));
+		break;
+	case SR_CONF_OUTPUT_FREQUENCY:
+		if (!g_variant_is_of_type(data, G_VARIANT_TYPE_DOUBLE))
+			return SR_ERR_ARG;
+		freq = g_variant_get_double(data);
+		break;
+	case SR_CONF_AMPLITUDE:
+		if (!g_variant_is_of_type(data, G_VARIANT_TYPE_DOUBLE))
+			return SR_ERR_ARG;
+		amp = g_variant_get_double(data);
+		break;
+	default:
+		return SR_ERR_NA;
+	}
+	if (eyes17_wg_check(wave, freq, amp) != SR_OK)
+		return SR_ERR_ARG;
+	g_strlcpy(devc->wg_wave, wave, sizeof(devc->wg_wave));
+	devc->wg_freq = freq;
+	devc->wg_amp = amp;
+	devc->wg_touched = TRUE;
+	if (!eyes17_port_open(devc))
+		return SR_OK;
+	return eyes17_wg_apply(devc->serial, wave, freq, amp);
+}
+
 static int config_set(uint32_t key, GVariant *data,
 	const struct sr_dev_inst *sdi, const struct sr_channel_group *cg)
 {
@@ -197,13 +304,16 @@ static int config_set(uint32_t key, GVariant *data,
 	unsigned n;
 	int gain;
 
-	(void)cg;
-
 	if (!sdi || !data)
 		return SR_ERR_ARG;
 	devc = sdi->priv;
 	if (!devc)
 		return SR_ERR_ARG;
+	if (cg) {
+		if (eyes17_is_wg_cg(cg))
+			return config_set_wg(devc, key, data);
+		return SR_ERR_NA;
+	}
 
 	switch (key) {
 	case SR_CONF_SAMPLERATE:
@@ -293,6 +403,15 @@ static int config_list(uint32_t key, GVariant **data,
 	switch (key) {
 	case SR_CONF_SCAN_OPTIONS:
 	case SR_CONF_DEVICE_OPTIONS:
+		if (cg) {
+			if (eyes17_is_wg_cg(cg)) {
+				*data = g_variant_new_fixed_array(
+					G_VARIANT_TYPE_UINT32, wg_opts,
+					ARRAY_SIZE(wg_opts), sizeof(uint32_t));
+				return SR_OK;
+			}
+			return SR_ERR_NA;
+		}
 		return std_opts_config_list(key, data, sdi, cg,
 			ARRAY_AND_SIZE(scanopts), ARRAY_AND_SIZE(drvopts),
 			ARRAY_AND_SIZE(devopts));
@@ -314,6 +433,31 @@ static int config_list(uint32_t key, GVariant **data,
 	default:
 		return SR_ERR_NA;
 	}
+}
+
+/*
+ * Stock serial open, then apply stored stimulus (M12). Covers the
+ * set-while-closed ordering; the set path sends immediately when the
+ * port is already open. Untouched outputs are never sent, so
+ * acquisition behavior without stimulus stays byte-identical.
+ */
+static int dev_open(struct sr_dev_inst *sdi)
+{
+	struct dev_context *devc;
+	int ret;
+
+	if (!sdi)
+		return SR_ERR_ARG;
+	ret = std_serial_dev_open(sdi);
+	if (ret != SR_OK)
+		return ret;
+	devc = sdi->priv;
+	if (!devc)
+		return SR_ERR_ARG;
+	if (!devc->wg_touched)
+		return SR_OK;
+	return eyes17_wg_apply(devc->serial, devc->wg_wave,
+		devc->wg_freq, devc->wg_amp);
 }
 
 /*
@@ -640,7 +784,7 @@ static struct sr_dev_driver eyes17_driver_info = {
 	.config_channel_set = NULL,
 	.config_commit = NULL,
 	.config_list = config_list,
-	.dev_open = std_serial_dev_open,
+	.dev_open = dev_open,
 	.dev_close = std_serial_dev_close,
 	.dev_acquisition_start = dev_acquisition_start,
 	.dev_acquisition_stop = std_serial_dev_acquisition_stop,

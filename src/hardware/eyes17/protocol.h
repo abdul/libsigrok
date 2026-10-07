@@ -116,6 +116,25 @@
 /* round-trip ≈ 1-2 ms. */
 #define EYES17_DIGITAL_MAX_SAMPLERATE 1000
 #define EYES17_DIGITAL_MAX_SAMPLES 4096
+/* On-board stimulus (M12). Golden eyes.py:set_wave:2771: WG frame is
+ * [WAVEGEN, SET_SINE1, HIGHRES|(prescaler<<1), wavelength-1 u16le] +
+ * ACK; 512-pt table below 1100 Hz, 32-pt at/above; prescalers
+ * 1/8/64/256 off 64 MHz, first wavelength < 65525 wins; below 0.1 Hz
+ * (incl. 0) the output switches off via [.., 0x80, 0]. Amplitude is a
+ * separate [WAVEGEN, SET_SINE_AMP, 0/1/2] + ACK (0.1/1/3.3 V,
+ * golden eyes.py:set_sine_amp:2839). Tria needs table upload and is
+ * out of scope (own task). */
+#define EYES17_HDR_WAVEGEN 7
+#define EYES17_SUB_SET_SINE1 13
+#define EYES17_SUB_SET_SINE_AMP 16
+#define EYES17_WG_TABLE_HIRES 512
+#define EYES17_WG_TABLE_LORES 32
+#define EYES17_WG_TABLE_SWITCH_HZ 1100
+#define EYES17_WG_MIN_HZ 0.1
+#define EYES17_WG_MAX_HZ 2000000
+#define EYES17_WG_FRAME_LEN 5
+#define EYES17_WG_OFF_BYTE 0x80
+#define EYES17_WG_AMP_STEPS { 0.1, 1.0, 3.3 }
 
 struct eyes17_version {
 	char raw[32];
@@ -144,6 +163,10 @@ struct dev_context {
 	char trigger_source[8];
 	char trigger_slope[8];
 	double trigger_level;
+	char wg_wave[8];
+	double wg_freq;
+	double wg_amp;
+	gboolean wg_touched;
 };
 
 SR_PRIV void eyes17_put_u16_le(uint8_t *p, uint16_t v);
@@ -157,7 +180,13 @@ SR_PRIV int eyes17_write_cmd(struct sr_serial_dev_inst *serial, uint8_t hdr,
 		uint8_t sub, const uint8_t *args, size_t arglen);
 SR_PRIV int eyes17_read_ack(struct sr_serial_dev_inst *serial);
 SR_PRIV int eyes17_get_version(struct sr_serial_dev_inst *serial,
-		struct eyes17_version *out);
+	struct eyes17_version *out);
+SR_PRIV double eyes17_py_round(double v);
+SR_PRIV int eyes17_wg_check(const char *wave, double freq, double amp);
+SR_PRIV int eyes17_wg_amp_step(double volts, int *step_out);
+SR_PRIV size_t eyes17_build_wg(uint8_t *buf, double freq);
+SR_PRIV int eyes17_wg_apply(struct sr_serial_dev_inst *serial,
+	const char *wave, double freq, double amp);
 SR_PRIV uint16_t eyes17_timebase_to_tb8(double timebase_us);
 SR_PRIV void eyes17_tb8_to_rate(uint16_t tb8, uint64_t *num, uint64_t *den);
 SR_PRIV uint16_t eyes17_clamp_count(size_t count);

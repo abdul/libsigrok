@@ -104,9 +104,54 @@ float eyes17_adc_to_volts_ideal(uint16_t raw, int gain, int ch)
 	return (float)(r0 / f + span * raw / EYES17_ADC10_FULL);
 }
 
+/*
+ * Ideal 12-bit curve: golden regenerateCalibration else-branch
+ * (achan.py:147): calPoly12 = [0, slope/4095, intercept] with
+ * slope/intercept scaled by the PGA factor. A3/MIC have no PGA,
+ * so their factor is pinned to 1. Codes are 12-bit (x = raw).
+ */
+float eyes17_adc_to_volts_ideal_12(uint16_t raw, int gain, int ch)
+{
+	double f, r0, r1, span;
+
+	if (!eyes17_gain_is_valid(gain) || ch < 0 || ch >= EYES17_NUM_CHANNELS)
+		return NAN;
+	f = (ch >= EYES17_CH_A3) ? 1.0 : eyes17_gain_factors[gain];
+	r0 = eyes17_ch_span[ch][0];
+	r1 = eyes17_ch_span[ch][1];
+	span = (r1 - r0) / f;
+	return (float)(r0 / f + span * raw / EYES17_ADC12_FULL);
+}
+
 gboolean eyes17_calibration_is_ready(void)
 {
 	return eyes17_calibration_ready;
+}
+
+/*
+ * 12-bit convert: same poly tables as the 10-bit path, evaluated
+ * at x = raw with no 10->12 upscale (golden achan.py __cal12__ vs
+ * __cal10__). A3/MIC pin to row 0 identically. Ideal fallback is
+ * the 4095-scale curve. Note: the 30% rule keeps evaluating at
+ * 12-bit full against the 10-bit-ideal helper — unchanged: flash
+ * polys are stored at 12-bit scale and the loader already upscales
+ * raw before evaluating.
+ */
+float eyes17_adc_to_volts_12(uint16_t raw, int gain, int ch)
+{
+	double x;
+	int row;
+
+	if (!eyes17_gain_is_valid(gain) || ch < 0 || ch >= EYES17_NUM_CHANNELS)
+		return NAN;
+	row = (ch >= EYES17_CH_A3) ? 0 : gain;
+	if (eyes17_calibration_ready && eyes17_cal_use_poly[ch][row]) {
+		x = raw;
+		return (float)(eyes17_cal_polys[ch][row][0] * x * x +
+			eyes17_cal_polys[ch][row][1] * x +
+			eyes17_cal_polys[ch][row][2]);
+	}
+	return eyes17_adc_to_volts_ideal_12(raw, gain, ch);
 }
 
 static double eyes17_ideal_at_12bit(int ch, int gain, double x)

@@ -220,6 +220,20 @@ START_TEST(test_trigger_level)
 }
 END_TEST
 
+/*
+ * 12-bit level code is the 4095-scale ideal inverse:
+ * 1.1 V gain 0 -> (16.5-1.1)*4095/33 = 1911. Out of range fails.
+ */
+START_TEST(test_trigger_level_code_12)
+{
+	uint16_t code = 0;
+
+	ck_assert_int_eq(eyes17_trigger_level_code_12(1.1, 0, &code), SR_OK);
+	ck_assert_uint_eq(code, 1911);
+	ck_assert_int_ne(eyes17_trigger_level_code_12(20.0, 0, &code), SR_OK);
+}
+END_TEST
+
 START_TEST(test_chosa_trigger_flag)
 {
 	uint8_t plain[EYES17_CAPTURE_FRAME_LEN];
@@ -566,6 +580,21 @@ START_TEST(test_a3_ideal_mid)
 END_TEST
 
 /*
+ * 12-bit convert uses x = raw (no 10->12 upscale): endpoints exact,
+ * mid ≈ 0. A1 gain 0 ideal: raw 0 -> +16.5, raw 4095 -> -16.5.
+ */
+START_TEST(test_convert_12_endpoints)
+{
+	ck_assert(fabsf(eyes17_adc_to_volts_12(0, 0, EYES17_CH_A1) - 16.5f) < 0.001f);
+	ck_assert(fabsf(eyes17_adc_to_volts_12(4095, 0, EYES17_CH_A1) + 16.5f) < 0.001f);
+	ck_assert(fabsf(eyes17_adc_to_volts_12(2048, 0, EYES17_CH_A1)) < 0.02f);
+	ck_assert(fabsf(eyes17_adc_to_volts_12(0, 0, EYES17_CH_MIC) + 3.3f) < 0.001f);
+	ck_assert(fabsf(eyes17_adc_to_volts_12(4095, 0, EYES17_CH_MIC) - 3.3f) < 0.001f);
+	ck_assert(isnan(eyes17_adc_to_volts_12(512, 0, 4)));
+}
+END_TEST
+
+/*
  * Task 6 config-surface tests. Range strings are the golden
  * eyes.py:select_range volts, 1:1 onto PGA gain indices 0..7.
  */
@@ -608,8 +637,8 @@ END_TEST
 START_TEST(test_resolution)
 {
 	ck_assert_int_eq(eyes17_check_resolution(10), SR_OK);
-	/* 12-bit is M6's: explicit SR_ERR, never silent fallback. */
-	ck_assert_int_eq(eyes17_check_resolution(12), SR_ERR);
+	/* 12-bit single is M6's: accepted here, multi fails as a combo. */
+	ck_assert_int_eq(eyes17_check_resolution(12), SR_OK);
 	ck_assert_int_eq(eyes17_check_resolution(8), SR_ERR_ARG);
 	ck_assert_int_eq(eyes17_check_resolution(16), SR_ERR_ARG);
 }
@@ -648,9 +677,9 @@ START_TEST(test_acquisition_check)
 		&tb8, &count), SR_OK);
 	ck_assert_uint_eq(tb8, 80);
 	ck_assert_uint_eq(count, 100);
-	/* 12-bit rejected, never silently downgraded. */
+	/* 12-bit single now accepted (M6); multi fails as a combo. */
 	ck_assert_int_eq(eyes17_check_acquisition(100000, 100, 0, 12, 1,
-		&tb8, &count), SR_ERR);
+		&tb8, &count), SR_OK);
 	/* Bad gain, off-ladder rate, and empty capture rejected. */
 	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 8, 10, 1,
 		&tb8, &count), SR_OK);
@@ -716,6 +745,33 @@ START_TEST(test_check_quad_acquisition)
 }
 END_TEST
 
+/*
+ * Resolution-aware validation: 12-bit needs single-channel and the
+ * 3 us floor; 12-bit multi fails (SCAN has no driver path).
+ */
+START_TEST(test_check_12bit_acquisition)
+{
+	uint16_t tb8 = 0, count = 0;
+
+	ck_assert_int_eq(eyes17_check_acquisition(100000, 2000, 0, 12,
+		1, &tb8, &count), SR_OK);
+	ck_assert_uint_eq(tb8, 80);
+	ck_assert_uint_eq(count, 2000);
+	/* 500 kHz is tb8 16: below the 12-bit floor. */
+	ck_assert_int_ne(eyes17_check_acquisition(500000, 100, 0, 12,
+		1, &tb8, &count), SR_OK);
+	/* 12-bit cap stays 10000. */
+	ck_assert_int_eq(eyes17_check_acquisition(100000, 12000, 0, 12,
+		1, &tb8, &count), SR_OK);
+	ck_assert_uint_eq(count, 10000);
+	/* 12-bit multi (dual/quad/SCAN) has no driver wire path. */
+	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 0, 12,
+		2, &tb8, &count), SR_OK);
+	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 0, 12,
+		4, &tb8, &count), SR_OK);
+}
+END_TEST
+
 Suite *suite_eyes17(void)
 {
 	Suite *s = suite_create("eyes17");
@@ -741,6 +797,7 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tt, test_fetch_channel_id);
 	tcase_add_test(tt, test_trigger_frame);
 	tcase_add_test(tt, test_trigger_level);
+	tcase_add_test(tt, test_trigger_level_code_12);
 	tcase_add_test(tk, test_gain_table);
 	tcase_add_test(tk, test_ideal_midscale);
 	tcase_add_test(tk, test_ideal_endpoints);
@@ -753,6 +810,7 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tk, test_a3_section_parse);
 	tcase_add_test(tk, test_a3_gain_pinned_row0);
 	tcase_add_test(tk, test_a3_ideal_mid);
+	tcase_add_test(tk, test_convert_12_endpoints);
 	tcase_add_test(tg, test_range_mapping);
 	tcase_add_test(tg, test_range_reject);
 	tcase_add_test(tg, test_resolution);
@@ -760,6 +818,7 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tg, test_acquisition_check);
 	tcase_add_test(tg, test_check_dual_acquisition);
 	tcase_add_test(tg, test_check_quad_acquisition);
+	tcase_add_test(tg, test_check_12bit_acquisition);
 	suite_add_tcase(s, tc);
 	suite_add_tcase(s, tt);
 	suite_add_tcase(s, tk);

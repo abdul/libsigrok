@@ -87,15 +87,16 @@ int eyes17_samplerate_to_tb8(uint64_t rate, uint16_t *tb8_out)
 }
 
 /*
- * 12-bit capture belongs to M6: reject it explicitly, never fall
- * back to 10-bit silently.
+ * Resolution gate: 10-bit dual/quad plus 12-bit single (M6).
+ * 12-bit multi (incl. CAPTURE_12BIT_SCAN) has no driver wire
+ * path and fails in check_acquisition as a combination.
  */
 int eyes17_check_resolution(int bits)
 {
 	if (bits == EYES17_RESOLUTION_10BIT)
 		return SR_OK;
 	if (bits == EYES17_RESOLUTION_12BIT)
-		return SR_ERR;
+		return SR_OK;
 	return SR_ERR_ARG;
 }
 
@@ -103,9 +104,12 @@ int eyes17_check_resolution(int bits)
  * Validate a requested acquisition combo before touching hardware.
  * Oversize sample counts clamp per the Task-4 convention (dual
  * captures clamp per channel to EYES17_MAX_SAMPLES_DUAL); a zero
- * count, an off-ladder rate, an invalid gain, 12-bit mode, a
- * channel count other than 1 or 2, or a dual rate below the
- * EYES17_TB8_MIN_DUAL floor fail.
+ * count, an off-ladder rate, an invalid gain, a channel count
+ * other than 1, 2 or 4, a dual/quad rate below the TB8_MIN floor,
+ * or a 12-bit combo other than single-channel at or above the
+ * 3 us floor (tb8 24, golden capture_highres_traces) fail. 12-bit
+ * multi (incl. CAPTURE_12BIT_SCAN) has no driver wire path. The
+ * 12-bit cap stays 10000 (single channel).
  */
 int eyes17_check_acquisition(uint64_t samplerate, uint64_t limit,
 		int gain, int resolution, int channels, uint16_t *tb8_out,
@@ -120,6 +124,8 @@ int eyes17_check_acquisition(uint64_t samplerate, uint64_t limit,
 	ret = eyes17_check_resolution(resolution);
 	if (ret != SR_OK)
 		return ret;
+	if (resolution == EYES17_RESOLUTION_12BIT && channels != 1)
+		return SR_ERR_ARG;
 	if (!eyes17_gain_is_valid(gain))
 		return SR_ERR_ARG;
 	if (eyes17_samplerate_to_tb8(samplerate, &tb8) != SR_OK)
@@ -127,7 +133,9 @@ int eyes17_check_acquisition(uint64_t samplerate, uint64_t limit,
 	if (limit == 0)
 		return SR_ERR_ARG;
 	tb8_min = (channels == 2) ? EYES17_TB8_MIN_DUAL :
-		((channels == 4) ? EYES17_TB8_MIN_QUAD : EYES17_TB8_MIN);
+		((channels == 4) ? EYES17_TB8_MIN_QUAD :
+		((resolution == EYES17_RESOLUTION_12BIT) ?
+			EYES17_TB8_MIN_12BIT : EYES17_TB8_MIN));
 	count_max = (channels == 2) ? EYES17_MAX_SAMPLES_DUAL :
 		((channels == 4) ? EYES17_MAX_SAMPLES_QUAD : EYES17_MAX_SAMPLES);
 	if (tb8 < tb8_min)

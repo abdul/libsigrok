@@ -36,8 +36,17 @@
 /* Hardware triggering (acquisition.c, M3). Golden eyes.py:configure_trigger:1182: [ADC, CONFIGURE_TRIGGER, (prescaler<<4)|(1<<chan), level u16le] + ACK. Single-channel A1 uses chan 0, prescaler 0 (8 ms hardware timeout). */
 #define EYES17_SUB_CONFIGURE_TRIGGER 5
 #define EYES17_TRIGGER_FRAME_LEN 5
-#define EYES17_TRIGGER_CHAN_A1 0
-#define EYES17_TRIGGER_LEVEL_MAX 1023
+ #define EYES17_TRIGGER_CHAN_A1 0
+ #define EYES17_TRIGGER_LEVEL_MAX 1023
+#define EYES17_TRIGGER_LEVEL_MAX_12 4095
+/* 12-bit single-channel (acquisition.c, M6). Golden
+ * eyes.py:capture_highres_traces: [ADC, CAPTURE_12BIT, CHOSA|trigger]
+ * + count + tb8 + ACK. Floor 3 us (tb8 24), cap 10000. Fetch is the
+ * same GET_CAPTURE_CHANNEL wire; codes are 12-bit (x = raw, no
+ * upscale). 12-bit multi (incl. CAPTURE_12BIT_SCAN) is rejected. */
+#define EYES17_SUB_CAPTURE_12BIT 13
+#define EYES17_TIMEBASE_MIN_12BIT_US 3.0
+#define EYES17_TB8_MIN_12BIT 24
 #define EYES17_SUB_GET_CAPTURE_STATUS 6
 #define EYES17_SUB_GET_CAPTURE_CHANNEL 7
 #define EYES17_HDR_COMMON 11
@@ -143,8 +152,11 @@ SR_PRIV size_t eyes17_build_capture_two(uint8_t *buf, uint16_t tb8,
 SR_PRIV size_t eyes17_build_fetch_channel(uint8_t *buf, uint8_t ch,
 		uint16_t n, uint16_t offset);
 SR_PRIV float eyes17_adc_to_volts(uint16_t raw, int gain, int ch);
+SR_PRIV float eyes17_adc_to_volts_12(uint16_t raw, int gain, int ch);
+SR_PRIV float eyes17_adc_to_volts_ideal_12(uint16_t raw, int gain, int ch);
 SR_PRIV size_t eyes17_build_trigger(uint8_t *buf, uint16_t level);
 SR_PRIV int eyes17_trigger_level_code(double volts, int gain, uint16_t *code_out);
+SR_PRIV int eyes17_trigger_level_code_12(double volts, int gain, uint16_t *code_out);
 SR_PRIV int eyes17_configure_trigger(struct sr_serial_dev_inst *serial, uint16_t level);
 
 /* Gain table, ideal curve, flash discipline (calibration.c). Gain

@@ -799,11 +799,38 @@ START_TEST(test_check_12bit_acquisition)
 	ck_assert_int_eq(eyes17_check_acquisition(100000, 12000, 0, 12,
 		1, &tb8, &count), SR_OK);
 	ck_assert_uint_eq(count, 10000);
-	/* 12-bit multi (dual/quad/SCAN) has no driver wire path. */
 	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 0, 12,
 		2, &tb8, &count), SR_OK);
 	ck_assert_int_ne(eyes17_check_acquisition(100000, 100, 0, 12,
 		4, &tb8, &count), SR_OK);
+}
+END_TEST
+/*
+ * Pack projects status bits through the enabled mask, LSB-first:
+ * mask 0xFF is identity; mask 0x03 keeps bits 0-1.
+ */
+START_TEST(test_pack_logic_sample)
+{
+	ck_assert_uint_eq(eyes17_pack_logic_sample(0xAA, 0xFF), 0xAA);
+	ck_assert_uint_eq(eyes17_pack_logic_sample(0xAA, 0x03), 0x02);
+	ck_assert_uint_eq(eyes17_pack_logic_sample(0xFF, 0x00), 0x00);
+}
+END_TEST
+/*
+ * Digital validation: rate cap 1000 Hz, count cap 4096, zero fails.
+ */
+START_TEST(test_check_digital)
+{
+	uint16_t iv = 0, count = 0;
+
+	ck_assert_int_eq(eyes17_check_digital(100, 200, &iv, &count), SR_OK);
+	ck_assert_uint_eq(iv, 10);
+	ck_assert_uint_eq(count, 200);
+	ck_assert_int_ne(eyes17_check_digital(2000, 100, &iv, &count), SR_OK);
+	ck_assert_int_eq(eyes17_check_digital(100, 99999, &iv, &count), SR_OK);
+	ck_assert_uint_eq(count, 4096);
+	ck_assert_int_ne(eyes17_check_digital(100, 0, &iv, &count), SR_OK);
+	ck_assert_int_ne(eyes17_check_digital(0, 100, &iv, &count), SR_OK);
 }
 END_TEST
 
@@ -856,6 +883,8 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tg, test_check_dual_acquisition);
 	tcase_add_test(tg, test_check_quad_acquisition);
 	tcase_add_test(tg, test_check_12bit_acquisition);
+	tcase_add_test(tg, test_pack_logic_sample);
+	tcase_add_test(tg, test_check_digital);
 	suite_add_tcase(s, tc);
 	suite_add_tcase(s, tt);
 	suite_add_tcase(s, tk);

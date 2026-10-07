@@ -834,3 +834,77 @@ int eyes17_capture_four_triggered(struct sr_serial_dev_inst *serial,
 	return eyes17_fetch_quad_stream(serial, count, gain,
 		v1_out, v2_out, v3_out, v4_out);
 }
+
+/*
+ * Digital status poll (M7). Golden eyes.py:get_states:2038 sends
+ * [DIN=9, GET_STATES=1] and reads a single bare byte (no ACK
+ * framing). Bench firmware is SJ-2.4, so the SJ-2.0 IN2-mode
+ * preamble (__write_data_address__(0x0E1E, 11)) is skipped.
+ * Bit N of the status byte is digital_inputs[N].
+ */
+int eyes17_poll_states(struct sr_serial_dev_inst *serial,
+		uint8_t *state_out)
+{
+	int ret;
+	uint8_t state;
+
+	if (!serial || !state_out)
+		return SR_ERR_ARG;
+	/* Write-only: the reply IS the status byte, no ACK precedes it. */
+	ret = eyes17_write_cmd(serial, EYES17_HDR_DIN,
+		EYES17_SUB_GET_STATES, NULL, 0);
+	if (ret != SR_OK)
+		return ret;
+	if (serial_read_blocking(serial, &state, 1,
+			EYES17_CAPTURE_TIMEOUT_MS) != 1)
+		return SR_ERR_TIMEOUT;
+	*state_out = state;
+	return SR_OK;
+}
+
+/*
+ * Digital validation: rate 1..1000 Hz (poll-based cap, NOT golden),
+ * limit 1..4096 (clamp above, fail zero). Interval out is
+ * milliseconds per poll (1000/rate); 100 Hz -> 10 ms.
+ */
+int eyes17_check_digital(uint64_t samplerate, uint64_t limit,
+		uint16_t *interval_ms_out, uint16_t *count_out)
+{
+	uint64_t interval;
+	uint16_t count;
+
+	if (samplerate < 1 || samplerate > EYES17_DIGITAL_MAX_SAMPLERATE)
+		return SR_ERR_ARG;
+	if (limit == 0)
+		return SR_ERR_ARG;
+	interval = 1000 / samplerate;
+	if (interval < 1)
+		interval = 1;
+	count = (limit > EYES17_DIGITAL_MAX_SAMPLES) ?
+		EYES17_DIGITAL_MAX_SAMPLES : (uint16_t)limit;
+	if (interval_ms_out)
+		*interval_ms_out = (uint16_t)interval;
+	if (count_out)
+		*count_out = count;
+	return SR_OK;
+}
+
+/*
+ * Dense LSB-first projection of the status byte through the enabled
+ * channel mask (bit N enabled?). All enabled is identity. Pure.
+ */
+uint8_t eyes17_pack_logic_sample(uint8_t status, uint8_t mask)
+{
+	uint8_t out = 0;
+	uint8_t bit = 0;
+	int i;
+
+	for (i = 0; i < EYES17_NUM_DIGITAL; i++) {
+		if (mask & (uint8_t)(1u << i)) {
+			if (status & (uint8_t)(1u << i))
+				out |= (uint8_t)(1u << bit);
+			bit++;
+		}
+	}
+	return out;
+}

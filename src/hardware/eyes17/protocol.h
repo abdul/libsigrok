@@ -100,6 +100,21 @@
 #define EYES17_FETCH_CH_A3 2
 #define EYES17_FETCH_CH_MIC 3
 #define EYES17_CAPTURE_TIMEOUT_MS 2000
+/* Digital inputs (acquisition.c, M7). Golden eyes.py:get_states:2038:
+ * [DIN=9, GET_STATES=1] -> 1 status byte, bit N = digital_inputs[N]
+ * (IN2, SQR1_READ, OD1_READ, SEN, SQR1, OD1, SQ2, SQ3). Polled block:
+ * driver samples the byte at the rate interval (no firmware LA
+ * stream exists in the high-level API). */
+#define EYES17_HDR_DIN 9
+#define EYES17_SUB_GET_STATES 1
+#define EYES17_NUM_DIGITAL 8
+#define EYES17_DIGITAL_NAMES { "IN2", "SQR1_READ", "OD1_READ", "SEN", \
+        "SQR1", "OD1", "SQ2", "SQ3" }
+/* Poll-based caps (driver-measured, NOT golden): single serial
+ * round-trip ≈ 1-2 ms. Re-measure on the bench during Task 3 and
+ * correct these with the measured numbers. */
+#define EYES17_DIGITAL_MAX_SAMPLERATE 1000
+#define EYES17_DIGITAL_MAX_SAMPLES 4096
 
 struct eyes17_version {
 	char raw[32];
@@ -207,5 +222,10 @@ SR_PRIV int eyes17_check_acquisition(uint64_t samplerate, uint64_t limit,
 SR_PRIV const char **eyes17_range_list(unsigned *n);
 SR_PRIV const char *eyes17_range_text(int gain);
 SR_PRIV int eyes17_range_to_gain(const char *s, int *gain_out);
+SR_PRIV int eyes17_poll_states(struct sr_serial_dev_inst *serial,
+        uint8_t *state_out);
+SR_PRIV int eyes17_check_digital(uint64_t samplerate, uint64_t limit,
+        uint16_t *interval_ms_out, uint16_t *count_out);
+SR_PRIV uint8_t eyes17_pack_logic_sample(uint8_t status, uint8_t mask);
 
 #endif

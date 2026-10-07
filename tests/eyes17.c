@@ -1119,6 +1119,114 @@ START_TEST(test_wg_apply_reject)
 }
 END_TEST
 
+/*
+ * SQ stimulus tests (M12 Task 2). Vectors replicate golden
+ * set_sqr1/set_sqr1_slow/set_state framing.
+ */
+START_TEST(test_sq_check)
+{
+	ck_assert_int_eq(eyes17_sq_check(1, 1000.0, 50.0), SR_OK);
+	ck_assert_int_eq(eyes17_sq_check(2, 1000.0, 50.0), SR_OK);
+	ck_assert_int_eq(eyes17_sq_check(1, 0.0, 50.0), SR_OK);
+	ck_assert_int_eq(eyes17_sq_check(1, -1.0, 50.0), SR_OK);
+	ck_assert_int_eq(eyes17_sq_check(2, 0.0, 0.0), SR_OK);
+	ck_assert_int_eq(eyes17_sq_check(1, 0.015, 50.0), SR_OK);
+	ck_assert_int_eq(eyes17_sq_check(1, 10000000.0, 50.0), SR_OK);
+	ck_assert_int_ne(eyes17_sq_check(3, 1000.0, 50.0), SR_OK);
+	ck_assert_int_ne(eyes17_sq_check(1, 1000.0, 0.0), SR_OK);
+	ck_assert_int_ne(eyes17_sq_check(1, 1000.0, 101.0), SR_OK);
+	ck_assert_int_ne(eyes17_sq_check(2, 2.0, 50.0), SR_OK);
+	ck_assert_int_ne(eyes17_sq_check(2, 10000000.1, 50.0), SR_OK);
+	ck_assert_int_ne(eyes17_sq_check(1, 0.014, 50.0), SR_OK);
+}
+END_TEST
+
+START_TEST(test_sq_build_fast)
+{
+	uint8_t buf[10];
+	uint8_t expect1[] = { 7, 3, 0x00, 0xfa, 0x00, 0x7d, 0x00 };
+	uint8_t expect2[] = { 7, 3, 0x00, 0xfa, 0x00, 0x7d, 0x04 };
+
+	ck_assert_uint_eq(eyes17_build_sq_fast(buf, 1000.0, 50.0, 0),
+		sizeof(expect1));
+	ck_assert_int_eq(memcmp(buf, expect1, sizeof(expect1)), 0);
+	ck_assert_uint_eq(eyes17_build_sq_fast(buf, 1000.0, 50.0, 1),
+		sizeof(expect2));
+	ck_assert_int_eq(memcmp(buf, expect2, sizeof(expect2)), 0);
+	ck_assert_uint_eq(eyes17_build_sq_fast(NULL, 1000.0, 50.0, 0), 0);
+}
+END_TEST
+
+START_TEST(test_sq_build_slow)
+{
+	uint8_t buf[10];
+	uint8_t expect[] =
+		{ 7, 4, 0x00, 0x50, 0xc3, 0x00, 0x00, 0xa8, 0x61, 0x00 };
+
+	ck_assert_uint_eq(eyes17_build_sq_slow(buf, 5.0, 50.0),
+		sizeof(expect));
+	ck_assert_int_eq(memcmp(buf, expect, sizeof(expect)), 0);
+	ck_assert_uint_eq(eyes17_build_sq_slow(buf, 0.01, 50.0), 0);
+	ck_assert_uint_eq(eyes17_build_sq_slow(NULL, 5.0, 50.0), 0);
+}
+END_TEST
+
+START_TEST(test_sq_build_park)
+{
+	uint8_t buf[10];
+	uint8_t expect_hi[] = { 8, 1, 0x44 };
+	uint8_t expect_lo[] = { 8, 1, 0x80 };
+
+	ck_assert_uint_eq(eyes17_build_sq_park(buf, 1, 1),
+		sizeof(expect_hi));
+	ck_assert_int_eq(memcmp(buf, expect_hi, sizeof(expect_hi)), 0);
+	ck_assert_uint_eq(eyes17_build_sq_park(buf, 2, 0),
+		sizeof(expect_lo));
+	ck_assert_int_eq(memcmp(buf, expect_lo, sizeof(expect_lo)), 0);
+	ck_assert_uint_eq(eyes17_build_sq_park(buf, 3, 1), 0);
+	ck_assert_uint_eq(eyes17_build_sq_park(NULL, 1, 1), 0);
+}
+END_TEST
+
+START_TEST(test_sq_apply_wire)
+{
+	static const uint8_t ack[] = { 0x01 };
+	static const uint8_t expect_fast[] =
+		{ 7, 3, 0x00, 0xfa, 0x00, 0x7d, 0x00 };
+	static const uint8_t expect_slow[] =
+		{ 7, 4, 0x00, 0x90, 0xd0, 0x03, 0x00, 0xa8, 0x61, 0x00 };
+	static const uint8_t expect_park[] = { 8, 1, 0x80 };
+	mock_reset();
+	mock_rx_feed(ack, sizeof(ack));
+	ck_assert_int_eq(eyes17_sq_apply(NULL, 1, 1000.0, 50.0), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, sizeof(expect_fast));
+	ck_assert_int_eq(memcmp(mock_tx, expect_fast,
+		sizeof(expect_fast)), 0);
+	mock_reset();
+	mock_rx_feed(ack, sizeof(ack));
+	ck_assert_int_eq(eyes17_sq_apply(NULL, 1, 1.0, 10.0), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, sizeof(expect_slow));
+	ck_assert_int_eq(memcmp(mock_tx, expect_slow,
+		sizeof(expect_slow)), 0);
+	mock_reset();
+	mock_rx_feed(ack, sizeof(ack));
+	ck_assert_int_eq(eyes17_sq_apply(NULL, 2, -1.0, 50.0), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, sizeof(expect_park));
+	ck_assert_int_eq(memcmp(mock_tx, expect_park,
+		sizeof(expect_park)), 0);
+}
+END_TEST
+
+START_TEST(test_sq_apply_reject)
+{
+	mock_reset();
+	ck_assert_int_ne(eyes17_sq_apply(NULL, 2, 2.0, 50.0), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, 0);
+	ck_assert_int_ne(eyes17_sq_apply(NULL, 1, 1000.0, 0.0), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, 0);
+}
+END_TEST
+
 Suite *suite_eyes17(void)
 {
 	Suite *s = suite_create("eyes17");
@@ -1137,6 +1245,12 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tc, test_wg_apply_wire);
 	tcase_add_test(tc, test_wg_apply_off);
 	tcase_add_test(tc, test_wg_apply_reject);
+	tcase_add_test(tc, test_sq_check);
+	tcase_add_test(tc, test_sq_build_fast);
+	tcase_add_test(tc, test_sq_build_slow);
+	tcase_add_test(tc, test_sq_build_park);
+	tcase_add_test(tc, test_sq_apply_wire);
+	tcase_add_test(tc, test_sq_apply_reject);
 	tcase_add_test(tc, test_ack_ok);
 	tcase_add_test(tc, test_ack_mask);
 	tcase_add_test(tc, test_ack_bad);

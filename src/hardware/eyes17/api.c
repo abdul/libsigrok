@@ -73,6 +73,81 @@ static gboolean eyes17_port_open(const struct dev_context *devc)
 #endif
 }
 
+/* SQ stimulus (M12 Task 2): output groups "SQ1"/"SQ2" carrying output
+ * frequency + duty cycle. SQ1 has the slow path below 4 Hz; SQ2 does
+ * not (golden has no slow sender for it). Park 0/-1 = HIGH/LOW. */
+static const uint32_t sq_opts[] = {
+	SR_CONF_OUTPUT_FREQUENCY | SR_CONF_GET | SR_CONF_SET,
+	SR_CONF_DUTY_CYCLE | SR_CONF_GET | SR_CONF_SET,
+};
+
+static int eyes17_sq_which(const struct sr_channel_group *cg)
+{
+	if (!cg || !cg->name)
+		return 0;
+	if (g_strcmp0(cg->name, "SQ1") == 0)
+		return 1;
+	if (g_strcmp0(cg->name, "SQ2") == 0)
+		return 2;
+	return 0;
+}
+
+static int eyes17_sq_get(const struct dev_context *devc, int which,
+	uint32_t key, GVariant **data)
+{
+	double freq = (which == 1) ? devc->sq1_freq : devc->sq2_freq;
+	double duty = (which == 1) ? devc->sq1_duty : devc->sq2_duty;
+
+	switch (key) {
+	case SR_CONF_OUTPUT_FREQUENCY:
+		*data = g_variant_new_double(freq);
+		break;
+	case SR_CONF_DUTY_CYCLE:
+		*data = g_variant_new_double(duty);
+		break;
+	default:
+		return SR_ERR_NA;
+	}
+
+	return SR_OK;
+}
+
+static int eyes17_sq_set(struct dev_context *devc, int which,
+	uint32_t key, GVariant *data)
+{
+	double freq = (which == 1) ? devc->sq1_freq : devc->sq2_freq;
+	double duty = (which == 1) ? devc->sq1_duty : devc->sq2_duty;
+
+	switch (key) {
+	case SR_CONF_OUTPUT_FREQUENCY:
+		if (!g_variant_is_of_type(data, G_VARIANT_TYPE_DOUBLE))
+			return SR_ERR_ARG;
+		freq = g_variant_get_double(data);
+		break;
+	case SR_CONF_DUTY_CYCLE:
+		if (!g_variant_is_of_type(data, G_VARIANT_TYPE_DOUBLE))
+			return SR_ERR_ARG;
+		duty = g_variant_get_double(data);
+		break;
+	default:
+		return SR_ERR_NA;
+	}
+	if (eyes17_sq_check(which, freq, duty) != SR_OK)
+		return SR_ERR_ARG;
+	if (which == 1) {
+		devc->sq1_freq = freq;
+		devc->sq1_duty = duty;
+		devc->sq1_touched = TRUE;
+	} else {
+		devc->sq2_freq = freq;
+		devc->sq2_duty = duty;
+		devc->sq2_touched = TRUE;
+	}
+	if (!eyes17_port_open(devc))
+		return SR_OK;
+	return eyes17_sq_apply(devc->serial, which, freq, duty);
+}
+
 /*
  * All of scan/config_get/config_set/config_list/dev_open/dev_close/
  * dev_acquisition_start/dev_acquisition_stop must be non-NULL: this tree's
@@ -128,6 +203,12 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 	devc->wg_freq = 0.0;
 	devc->wg_amp = 1.0;
 	devc->wg_touched = FALSE;
+	devc->sq1_freq = 0.0;
+	devc->sq1_duty = 50.0;
+	devc->sq1_touched = FALSE;
+	devc->sq2_freq = 0.0;
+	devc->sq2_duty = 50.0;
+	devc->sq2_touched = FALSE;
 	if (eyes17_get_version(serial, &devc->fw) != SR_OK) {
 		g_free(devc);
 		serial_close(serial);
@@ -173,6 +254,8 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 	 * touching the scope channel topology.
 	 */
 	sr_channel_group_new(sdi, "WG", NULL);
+	sr_channel_group_new(sdi, "SQ1", NULL);
+	sr_channel_group_new(sdi, "SQ2", NULL);
 
 	return std_scan_complete(driver, g_slist_append(NULL, sdi));
 }
@@ -211,6 +294,9 @@ static int config_get(uint32_t key, GVariant **data,
 	if (cg) {
 		if (eyes17_is_wg_cg(cg))
 			return config_get_wg(key, data, devc);
+		if (eyes17_sq_which(cg))
+			return eyes17_sq_get(devc, eyes17_sq_which(cg),
+				key, data);
 		return SR_ERR_NA;
 	}
 
@@ -312,6 +398,9 @@ static int config_set(uint32_t key, GVariant *data,
 	if (cg) {
 		if (eyes17_is_wg_cg(cg))
 			return config_set_wg(devc, key, data);
+		if (eyes17_sq_which(cg))
+			return eyes17_sq_set(devc, eyes17_sq_which(cg),
+				key, data);
 		return SR_ERR_NA;
 	}
 
@@ -410,6 +499,12 @@ static int config_list(uint32_t key, GVariant **data,
 					ARRAY_SIZE(wg_opts), sizeof(uint32_t));
 				return SR_OK;
 			}
+			if (eyes17_sq_which(cg)) {
+				*data = g_variant_new_fixed_array(
+					G_VARIANT_TYPE_UINT32, sq_opts,
+					ARRAY_SIZE(sq_opts), sizeof(uint32_t));
+				return SR_OK;
+			}
 			return SR_ERR_NA;
 		}
 		return std_opts_config_list(key, data, sdi, cg,
@@ -454,10 +549,27 @@ static int dev_open(struct sr_dev_inst *sdi)
 	devc = sdi->priv;
 	if (!devc)
 		return SR_ERR_ARG;
-	if (!devc->wg_touched)
+	if (!devc->wg_touched && !devc->sq1_touched && !devc->sq2_touched)
 		return SR_OK;
-	return eyes17_wg_apply(devc->serial, devc->wg_wave,
-		devc->wg_freq, devc->wg_amp);
+	if (devc->wg_touched) {
+		ret = eyes17_wg_apply(devc->serial, devc->wg_wave,
+			devc->wg_freq, devc->wg_amp);
+		if (ret != SR_OK)
+			return ret;
+	}
+	if (devc->sq1_touched) {
+		ret = eyes17_sq_apply(devc->serial, 1,
+			devc->sq1_freq, devc->sq1_duty);
+		if (ret != SR_OK)
+			return ret;
+	}
+	if (devc->sq2_touched) {
+		ret = eyes17_sq_apply(devc->serial, 2,
+			devc->sq2_freq, devc->sq2_duty);
+		if (ret != SR_OK)
+			return ret;
+	}
+	return SR_OK;
 }
 
 /*

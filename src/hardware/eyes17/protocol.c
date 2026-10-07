@@ -286,3 +286,126 @@ int eyes17_wg_apply(struct sr_serial_dev_inst *serial,
 	return eyes17_send_cmd(serial, EYES17_HDR_WAVEGEN,
 		EYES17_SUB_SET_SINE_AMP, &ab, sizeof(ab));
 }
+
+int eyes17_sq_check(int which, double freq, double duty)
+{
+	if (which != 1 && which != 2)
+		return SR_ERR_ARG;
+	if (freq == (double)EYES17_SQ_PARK_HIGH ||
+		freq == (double)EYES17_SQ_PARK_LOW)
+		return SR_OK;
+	if (duty <= 0.0 || duty > 100.0)
+		return SR_ERR_ARG;
+	if (which == 2) {
+		if (freq < (double)EYES17_SQ_FAST_MIN_HZ ||
+			freq > (double)EYES17_SQ_FAST_MAX_HZ)
+			return SR_ERR_ARG;
+		return SR_OK;
+	}
+	if (freq > (double)EYES17_SQ_FAST_MAX_HZ)
+		return SR_ERR_ARG;
+	if (64000000.0 / freq > EYES17_SQ_SLOW_W_MAX)
+		return SR_ERR_ARG;
+	return SR_OK;
+}
+
+size_t eyes17_build_sq_fast(uint8_t *buf, double freq,
+	double duty, int sq2)
+{
+	static const double pres[] = { 1.0, 8.0, 64.0, 256.0 };
+	double wavelength, high_time;
+	int prescaler;
+
+	if (!buf)
+		return 0;
+	prescaler = 0;
+	wavelength = 0.0;
+	while (prescaler <= 3) {
+		wavelength = eyes17_py_round(
+			64000000.0 / freq / pres[prescaler]);
+		if (wavelength < 65525.0)
+			break;
+		prescaler++;
+	}
+	if (prescaler == 4 || wavelength < 1.0)
+		return 0;
+	high_time = eyes17_py_round(wavelength * duty / 100.0);
+	buf[0] = EYES17_HDR_WAVEGEN;
+	buf[1] = EYES17_SUB_SET_SQR1;
+	eyes17_put_u16_le(buf + 2, (uint16_t)wavelength);
+	eyes17_put_u16_le(buf + 4, (uint16_t)high_time);
+	buf[6] = (uint8_t)(prescaler | (sq2 ? 0x4 : 0x0));
+	return 7;
+}
+
+size_t eyes17_build_sq_slow(uint8_t *buf, double freq, double duty)
+{
+	double w, h;
+	uint32_t wi, hi;
+
+	if (!buf)
+		return 0;
+	w = eyes17_py_round(64000000.0 / freq);
+	if (w < 1.0 || w > EYES17_SQ_SLOW_W_MAX)
+		return 0;
+	h = eyes17_py_round(w * duty / 100.0);
+	wi = (uint32_t)w;
+	hi = (uint32_t)h;
+	buf[0] = EYES17_HDR_WAVEGEN;
+	buf[1] = EYES17_SUB_SET_SQR_LONG;
+	eyes17_put_u16_le(buf + 2, (uint16_t)(wi & 0xffff));
+	eyes17_put_u16_le(buf + 4, (uint16_t)((wi >> 16) & 0xffff));
+	eyes17_put_u16_le(buf + 6, (uint16_t)(hi & 0xffff));
+	eyes17_put_u16_le(buf + 8, (uint16_t)((hi >> 16) & 0xffff));
+	return 10;
+}
+
+size_t eyes17_build_sq_park(uint8_t *buf, int which, int high)
+{
+	uint8_t data;
+
+	if (!buf || (which != 1 && which != 2))
+		return 0;
+	if (which == 1)
+		data = (uint8_t)(0x40 | (high ? 0x04 : 0x00));
+	else
+		data = (uint8_t)(0x80 | (high ? 0x08 : 0x00));
+	buf[0] = EYES17_HDR_DOUT;
+	buf[1] = EYES17_SUB_SET_STATE;
+	buf[2] = data;
+	return 3;
+}
+
+int eyes17_sq_apply(struct sr_serial_dev_inst *serial, int which,
+	double freq, double duty)
+{
+	uint8_t buf[10];
+	size_t n;
+	int ret;
+
+	if (eyes17_sq_check(which, freq, duty) != SR_OK)
+		return SR_ERR_ARG;
+	if (freq == (double)EYES17_SQ_PARK_HIGH ||
+		freq == (double)EYES17_SQ_PARK_LOW) {
+		n = eyes17_build_sq_park(buf, which,
+			freq == (double)EYES17_SQ_PARK_HIGH);
+		if (n != 3)
+			return SR_ERR_ARG;
+		return eyes17_send_cmd(serial, buf[0], buf[1],
+			buf + 2, n - 2);
+	}
+	if (freq < (double)EYES17_SQ_FAST_MIN_HZ) {
+		if (which != 1)
+			return SR_ERR_ARG;
+		n = eyes17_build_sq_slow(buf, freq, duty);
+		if (n != 10)
+			return SR_ERR_ARG;
+		ret = eyes17_send_cmd(serial, buf[0], buf[1],
+			buf + 2, n - 2);
+		return ret;
+	}
+	n = eyes17_build_sq_fast(buf, freq, duty, which == 2);
+	if (n != 7)
+		return SR_ERR_ARG;
+	return eyes17_send_cmd(serial, buf[0], buf[1], buf + 2, n - 2);
+}

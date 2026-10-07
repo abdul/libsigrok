@@ -135,6 +135,24 @@
 #define EYES17_WG_FRAME_LEN 5
 #define EYES17_WG_OFF_BYTE 0x80
 #define EYES17_WG_AMP_STEPS { 0.1, 1.0, 3.3 }
+/* SQ stimulus (M12 Task 2). Golden set_sqr1:2990: fast frame is
+ * [WAVEGEN, SET_SQR1, wavelength u16le, high_time u16le, prescaler]
+ * + ACK (prescalers 1/8/64/256 off 64 MHz, SQ2 = prescaler|0x4,
+ * golden set_sqr2:3090); freq < 4 Hz falls through to the slow path
+ * [WAVEGEN, SET_SQR_LONG, W lo/hi, H lo/hi] + ACK (SQ1 only, golden
+ * set_sqr1_slow:3043, 32-bit counters); 0/-1 parks HIGH/LOW via
+ * [DOUT=8, SET_STATE=1, data] (golden set_state:2078); duty 0 means
+ * no-act. SQ2 has no golden slow path (prescaler-exhausted no-send).
+ */
+#define EYES17_SUB_SET_SQR1 3
+#define EYES17_SUB_SET_SQR_LONG 4
+#define EYES17_SQ_FAST_MIN_HZ 4
+#define EYES17_SQ_FAST_MAX_HZ 10000000
+#define EYES17_HDR_DOUT 8
+#define EYES17_SUB_SET_STATE 1
+#define EYES17_SQ_PARK_HIGH 0
+#define EYES17_SQ_PARK_LOW -1
+#define EYES17_SQ_SLOW_W_MAX 4294967295.0
 
 struct eyes17_version {
 	char raw[32];
@@ -167,6 +185,12 @@ struct dev_context {
 	double wg_freq;
 	double wg_amp;
 	gboolean wg_touched;
+	double sq1_freq;
+	double sq1_duty;
+	gboolean sq1_touched;
+	double sq2_freq;
+	double sq2_duty;
+	gboolean sq2_touched;
 };
 
 SR_PRIV void eyes17_put_u16_le(uint8_t *p, uint16_t v);
@@ -187,6 +211,14 @@ SR_PRIV int eyes17_wg_amp_step(double volts, int *step_out);
 SR_PRIV size_t eyes17_build_wg(uint8_t *buf, double freq);
 SR_PRIV int eyes17_wg_apply(struct sr_serial_dev_inst *serial,
 	const char *wave, double freq, double amp);
+SR_PRIV int eyes17_sq_check(int which, double freq, double duty);
+SR_PRIV size_t eyes17_build_sq_fast(uint8_t *buf, double freq,
+	double duty, int sq2);
+SR_PRIV size_t eyes17_build_sq_slow(uint8_t *buf, double freq,
+	double duty);
+SR_PRIV size_t eyes17_build_sq_park(uint8_t *buf, int which, int high);
+SR_PRIV int eyes17_sq_apply(struct sr_serial_dev_inst *serial, int which,
+	double freq, double duty);
 SR_PRIV uint16_t eyes17_timebase_to_tb8(double timebase_us);
 SR_PRIV void eyes17_tb8_to_rate(uint16_t tb8, uint64_t *num, uint64_t *den);
 SR_PRIV uint16_t eyes17_clamp_count(size_t count);

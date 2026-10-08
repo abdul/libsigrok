@@ -160,6 +160,11 @@
  * out-of-span is rejected, never clamped silently. */
 #define EYES17_HDR_DAC 6
 #define EYES17_SUB_SET_DAC 1
+/* OD1 output (M12 follow-up): DOUT/SET_STATE byte carries one bit per
+ * output (golden set_state:2078: 0x10 OD1 + value bit 0). NOTE the byte
+ * is shared: setting any DOUT output clears the others (golden builds
+ * the byte from the given kwargs only) — parking one output parks all.
+ */
 
 struct eyes17_version {
 	char raw[32];
@@ -202,6 +207,8 @@ struct dev_context {
 	gboolean pv1_touched;
 	double pv2_volts;
 	gboolean pv2_touched;
+	gboolean od1_high;
+	gboolean od1_touched;
 };
 
 SR_PRIV void eyes17_put_u16_le(uint8_t *p, uint16_t v);
@@ -235,6 +242,8 @@ SR_PRIV int eyes17_pv_code(int which, double volts, uint16_t *code_out);
 SR_PRIV size_t eyes17_build_pv(uint8_t *buf, int which, uint16_t code);
 SR_PRIV int eyes17_pv_apply(struct sr_serial_dev_inst *serial, int which,
 	double volts);
+SR_PRIV size_t eyes17_build_od(uint8_t *buf, int high);
+SR_PRIV int eyes17_od_apply(struct sr_serial_dev_inst *serial, int high);
 SR_PRIV uint16_t eyes17_timebase_to_tb8(double timebase_us);
 SR_PRIV void eyes17_tb8_to_rate(uint16_t tb8, uint64_t *num, uint64_t *den);
 SR_PRIV uint16_t eyes17_clamp_count(size_t count);

@@ -200,6 +200,45 @@ static int eyes17_pv_set(struct dev_context *devc, int which,
 	return eyes17_pv_apply(devc->serial, which, volts);
 }
 
+/* OD1 output (M12 follow-up): group "OD1" with a level bool. Same
+ * shared-DOUT-byte caveat as the SQ parks (setting one DOUT output
+ * clears the others — golden set_state builds the byte from kwargs).
+ */
+static const uint32_t od_opts[] = {
+	SR_CONF_ENABLED | SR_CONF_GET | SR_CONF_SET,
+};
+
+static gboolean eyes17_is_od_cg(const struct sr_channel_group *cg)
+{
+	return cg && cg->name && g_strcmp0(cg->name, "OD1") == 0;
+}
+
+static int eyes17_od_get(const struct dev_context *devc,
+	uint32_t key, GVariant **data)
+{
+	if (key != SR_CONF_ENABLED)
+		return SR_ERR_NA;
+	*data = g_variant_new_boolean(devc->od1_high);
+	return SR_OK;
+}
+
+static int eyes17_od_set(struct dev_context *devc,
+	uint32_t key, GVariant *data)
+{
+	gboolean high;
+
+	if (key != SR_CONF_ENABLED)
+		return SR_ERR_NA;
+	if (!g_variant_is_of_type(data, G_VARIANT_TYPE_BOOLEAN))
+		return SR_ERR_ARG;
+	high = g_variant_get_boolean(data);
+	devc->od1_high = high;
+	devc->od1_touched = TRUE;
+	if (!eyes17_port_open(devc))
+		return SR_OK;
+	return eyes17_od_apply(devc->serial, high);
+}
+
 /*
  * All of scan/config_get/config_set/config_list/dev_open/dev_close/
  * dev_acquisition_start/dev_acquisition_stop must be non-NULL: this tree's
@@ -265,6 +304,8 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 	devc->pv1_touched = FALSE;
 	devc->pv2_volts = 0.0;
 	devc->pv2_touched = FALSE;
+	devc->od1_high = FALSE;
+	devc->od1_touched = FALSE;
 	if (eyes17_get_version(serial, &devc->fw) != SR_OK) {
 		g_free(devc);
 		serial_close(serial);
@@ -314,6 +355,7 @@ static GSList *scan(struct sr_dev_driver *driver, GSList *options)
 	sr_channel_group_new(sdi, "SQ2", NULL);
 	sr_channel_group_new(sdi, "PV1", NULL);
 	sr_channel_group_new(sdi, "PV2", NULL);
+	sr_channel_group_new(sdi, "OD1", NULL);
 
 	return std_scan_complete(driver, g_slist_append(NULL, sdi));
 }
@@ -358,6 +400,8 @@ static int config_get(uint32_t key, GVariant **data,
 		if (eyes17_pv_which(cg))
 			return eyes17_pv_get(devc, eyes17_pv_which(cg),
 				key, data);
+		if (eyes17_is_od_cg(cg))
+			return eyes17_od_get(devc, key, data);
 		return SR_ERR_NA;
 	}
 
@@ -465,6 +509,8 @@ static int config_set(uint32_t key, GVariant *data,
 		if (eyes17_pv_which(cg))
 			return eyes17_pv_set(devc, eyes17_pv_which(cg),
 				key, data);
+		if (eyes17_is_od_cg(cg))
+			return eyes17_od_set(devc, key, data);
 		return SR_ERR_NA;
 	}
 
@@ -575,6 +621,12 @@ static int config_list(uint32_t key, GVariant **data,
 					ARRAY_SIZE(pv_opts), sizeof(uint32_t));
 				return SR_OK;
 			}
+			if (eyes17_is_od_cg(cg)) {
+				*data = g_variant_new_fixed_array(
+					G_VARIANT_TYPE_UINT32, od_opts,
+					ARRAY_SIZE(od_opts), sizeof(uint32_t));
+				return SR_OK;
+			}
 			return SR_ERR_NA;
 		}
 		return std_opts_config_list(key, data, sdi, cg,
@@ -620,7 +672,8 @@ static int dev_open(struct sr_dev_inst *sdi)
 	if (!devc)
 		return SR_ERR_ARG;
 	if (!devc->wg_touched && !devc->sq1_touched && !devc->sq2_touched &&
-		!devc->pv1_touched && !devc->pv2_touched)
+		!devc->pv1_touched && !devc->pv2_touched &&
+		!devc->od1_touched)
 		return SR_OK;
 	if (devc->wg_touched) {
 		ret = eyes17_wg_apply(devc->serial, devc->wg_wave,
@@ -647,6 +700,11 @@ static int dev_open(struct sr_dev_inst *sdi)
 	}
 	if (devc->pv2_touched) {
 		ret = eyes17_pv_apply(devc->serial, 2, devc->pv2_volts);
+		if (ret != SR_OK)
+			return ret;
+	}
+	if (devc->od1_touched) {
+		ret = eyes17_od_apply(devc->serial, devc->od1_high);
 		if (ret != SR_OK)
 			return ret;
 	}

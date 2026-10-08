@@ -1305,6 +1305,36 @@ START_TEST(test_pv_apply_wire)
 }
 END_TEST
 
+/*
+ * OD1 output tests (M12 follow-up): DOUT/SET_STATE byte vectors and
+ * the wire send. Golden set_state:2078 (0x10 OD1 + value bit 0).
+ */
+START_TEST(test_od_build)
+{
+	uint8_t buf[3];
+	uint8_t expect_hi[] = { 8, 1, 0x11 };
+	uint8_t expect_lo[] = { 8, 1, 0x10 };
+
+	ck_assert_uint_eq(eyes17_build_od(buf, 1), sizeof(expect_hi));
+	ck_assert_int_eq(memcmp(buf, expect_hi, sizeof(expect_hi)), 0);
+	ck_assert_uint_eq(eyes17_build_od(buf, 0), sizeof(expect_lo));
+	ck_assert_int_eq(memcmp(buf, expect_lo, sizeof(expect_lo)), 0);
+	ck_assert_uint_eq(eyes17_build_od(NULL, 1), 0);
+}
+END_TEST
+
+START_TEST(test_od_apply_wire)
+{
+	static const uint8_t ack[] = { 0x01 };
+	static const uint8_t expect[] = { 8, 1, 0x11 };
+	mock_reset();
+	mock_rx_feed(ack, sizeof(ack));
+	ck_assert_int_eq(eyes17_od_apply(NULL, 1), SR_OK);
+	ck_assert_uint_eq(mock_tx_len, sizeof(expect));
+	ck_assert_int_eq(memcmp(mock_tx, expect, sizeof(expect)), 0);
+}
+END_TEST
+
 Suite *suite_eyes17(void)
 {
 	Suite *s = suite_create("eyes17");
@@ -1333,6 +1363,8 @@ Suite *suite_eyes17(void)
 	tcase_add_test(tc, test_pv_code);
 	tcase_add_test(tc, test_pv_build);
 	tcase_add_test(tc, test_pv_apply_wire);
+	tcase_add_test(tc, test_od_build);
+	tcase_add_test(tc, test_od_apply_wire);
 	tcase_add_test(tc, test_ack_ok);
 	tcase_add_test(tc, test_ack_mask);
 	tcase_add_test(tc, test_ack_bad);

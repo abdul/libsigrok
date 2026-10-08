@@ -56,9 +56,19 @@ int eyes17_send_cmd(struct sr_serial_dev_inst *serial, uint8_t hdr,
 	int ret;
 
 	ret = eyes17_write_cmd(serial, hdr, sub, args, arglen);
+	if (getenv("EYES17_TXLOG")) {
+		size_t k;
+		fprintf(stderr, "EYES17-TX [%02x %02x", hdr, sub);
+		for (k = 0; k < arglen; k++)
+			fprintf(stderr, " %02x", args[k]);
+		fprintf(stderr, "] wr=%d\n", ret);
+	}
 	if (ret != SR_OK)
 		return ret;
-	return eyes17_read_ack(serial);
+	ret = eyes17_read_ack(serial);
+	if (getenv("EYES17_TXLOG"))
+		fprintf(stderr, "EYES17-TX ack=%d\n", ret);
+	return ret;
 }
 
 int eyes17_get_version(struct sr_serial_dev_inst *serial,
@@ -461,6 +471,27 @@ int eyes17_pv_apply(struct sr_serial_dev_inst *serial, int which,
 		return SR_ERR_ARG;
 	n = eyes17_build_pv(buf, which, code);
 	if (n != 4)
+		return SR_ERR_ARG;
+	return eyes17_send_cmd(serial, buf[0], buf[1], buf + 2, n - 2);
+}
+
+size_t eyes17_build_od(uint8_t *buf, int high)
+{
+	if (!buf)
+		return 0;
+	buf[0] = EYES17_HDR_DOUT;
+	buf[1] = EYES17_SUB_SET_STATE;
+	buf[2] = (uint8_t)(0x10 | (high ? 0x01 : 0x00));
+	return 3;
+}
+
+int eyes17_od_apply(struct sr_serial_dev_inst *serial, int high)
+{
+	uint8_t buf[3];
+	size_t n;
+
+	n = eyes17_build_od(buf, high);
+	if (n != 3)
 		return SR_ERR_ARG;
 	return eyes17_send_cmd(serial, buf[0], buf[1], buf + 2, n - 2);
 }
